@@ -164,6 +164,89 @@ export const createServer = async () => {
     await store.appendLog(jobId, entry);
     broadcastLogEntry(jobId, entry);
   };
+  const multipartJobHandler = asyncHandler(async (req, res) => {
+    const file = req.file;
+    if (!file?.buffer?.length) {
+      throw new HttpError(400, { error: "zip_missing" });
+    }
+
+    const pageId = typeof req.body?.pageId === "string" ? req.body.pageId : undefined;
+    const pagePath = typeof req.body?.pagePath === "string" ? req.body.pagePath : undefined;
+    const rawTitle = typeof req.body?.title === "string" ? req.body.title.trim() : undefined;
+
+    const metadata: JobMetadata = {
+      title: rawTitle || undefined,
+      pageId,
+      pagePath,
+      source: "multipart-form",
+    };
+
+    const { jobId, createdAt } = await submitJob({
+      jobIdInput: normalizeJobIdCandidate(pageId),
+      archiveBuffer: file.buffer,
+      metadata,
+      headerSnapshot: pickRequestHeaders(req),
+      requestSnapshot: {
+        source: "multipart-form",
+        pageId,
+        pagePath,
+        title: rawTitle,
+      },
+    });
+
+    res.status(202).json({
+      jobId,
+      status: "queued",
+      createdAt,
+    });
+  });
+
+  const jsonJobHandler = asyncHandler(async (req, res) => {
+    const parseResult = jobRequestSchema.safeParse(req.body);
+    if (!parseResult.success) {
+      throw new HttpError(400, {
+        error: "validation_failed",
+        details: parseResult.error.flatten(),
+      });
+    }
+
+    const body = parseResult.data;
+    const base64Payload = body.sourceArchive.replace(/\s+/g, "");
+    if (!BASE64_PATTERN.test(base64Payload) || base64Payload.length === 0) {
+      throw new HttpError(400, { error: "invalid_base64" });
+    }
+
+    let archiveBuffer: Buffer;
+    try {
+      archiveBuffer = Buffer.from(base64Payload, "base64");
+    } catch {
+      throw new HttpError(400, { error: "invalid_base64" });
+    }
+
+    const reEncoded = archiveBuffer.toString("base64").replace(/=+$/, "");
+    const normalizedInput = base64Payload.replace(/=+$/, "");
+    if (reEncoded !== normalizedInput) {
+      throw new HttpError(400, { error: "invalid_base64" });
+    }
+
+    const { jobId, createdAt } = await submitJob({
+      jobIdInput: body.jobId,
+      archiveBuffer,
+      metadata: body.metadata,
+      cliOptions: body.cliOptions,
+      headerSnapshot: pickRequestHeaders(req),
+      requestSnapshot: {
+        source: "json-base64",
+      },
+    });
+
+    res.status(202).json({
+      jobId,
+      status: "queued",
+      createdAt,
+    });
+  });
+
   const upload = multer({
     storage: multer.memoryStorage(),
     limits: {
@@ -384,98 +467,24 @@ export const createServer = async () => {
     });
   });
 
-  app.post(
-    "/api/v1/jobs",
-    asyncHandler(async (req, res) => {
-      const parseResult = jobRequestSchema.safeParse(req.body);
-      if (!parseResult.success) {
-        throw new HttpError(400, {
-          error: "validation_failed",
-          details: parseResult.error.flatten(),
-        });
+  app.post("/vivliostyle/jobs", (req, res, next) => {
+    const contentType = req.headers["content-type"] ?? "";
+    if (!contentType.includes("multipart/form-data")) {
+      return next();
+    }
+    upload.single("zip")(req, res, (err) => {
+      if (err) {
+        next(err);
+        return;
       }
+      multipartJobHandler(req, res, next);
+    });
+  });
 
-      const body = parseResult.data;
-      const base64Payload = body.sourceArchive.replace(/\s+/g, "");
-      if (!BASE64_PATTERN.test(base64Payload) || base64Payload.length === 0) {
-        throw new HttpError(400, { error: "invalid_base64" });
-      }
-
-      let archiveBuffer: Buffer;
-      try {
-        archiveBuffer = Buffer.from(base64Payload, "base64");
-      } catch {
-        throw new HttpError(400, { error: "invalid_base64" });
-      }
-
-      const reEncoded = archiveBuffer.toString("base64").replace(/=+$/, "");
-      const normalizedInput = base64Payload.replace(/=+$/, "");
-      if (reEncoded !== normalizedInput) {
-        throw new HttpError(400, { error: "invalid_base64" });
-      }
-
-      const { jobId, createdAt } = await submitJob({
-        jobIdInput: body.jobId,
-        archiveBuffer,
-        metadata: body.metadata,
-        cliOptions: body.cliOptions,
-        headerSnapshot: pickRequestHeaders(req),
-        requestSnapshot: {
-          source: "json-base64",
-        },
-      });
-
-      res.status(202).json({
-        jobId,
-        status: "queued",
-        createdAt,
-      });
-    }),
-  );
-
-  app.post(
-    "/vivliostyle/jobs",
-    upload.single("zip"),
-    asyncHandler(async (req, res) => {
-      const file = req.file;
-      if (!file?.buffer?.length) {
-        throw new HttpError(400, { error: "zip_missing" });
-      }
-
-      const pageId = typeof req.body?.pageId === "string" ? req.body.pageId : undefined;
-      const pagePath = typeof req.body?.pagePath === "string" ? req.body.pagePath : undefined;
-      const rawTitle = typeof req.body?.title === "string" ? req.body.title.trim() : undefined;
-
-      const metadata: JobMetadata = {
-        title: rawTitle || undefined,
-        pageId,
-        pagePath,
-        source: "multipart-form",
-      };
-
-      const { jobId, createdAt } = await submitJob({
-        jobIdInput: normalizeJobIdCandidate(pageId),
-        archiveBuffer: file.buffer,
-        metadata,
-        headerSnapshot: pickRequestHeaders(req),
-        requestSnapshot: {
-          source: "multipart-form",
-          pageId,
-          pagePath,
-          title: rawTitle,
-        },
-      });
-
-      res.status(202).json({
-        jobId,
-        status: "queued",
-        createdAt,
-      });
-    }),
-  );
+  app.post("/vivliostyle/jobs", jsonJobHandler);
 
   app.get(
-    "/api/v1/jobs/:jobId",
+    "/vivliostyle/jobs/:jobId",
     asyncHandler(async (req, res) => {
       const job = store.get(req.params.jobId);
       if (!job) {
@@ -495,7 +504,7 @@ export const createServer = async () => {
   );
 
   app.get(
-    "/api/v1/jobs/:jobId/result",
+    "/vivliostyle/jobs/:jobId/result",
     asyncHandler(async (req, res) => {
       const job = store.get(req.params.jobId);
       if (!job) {
@@ -545,7 +554,7 @@ export const createServer = async () => {
   );
 
   app.get(
-    "/api/v1/jobs/:jobId/log",
+    "/vivliostyle/jobs/:jobId/log",
     asyncHandler(async (req, res) => {
       const job = store.get(req.params.jobId);
       if (!job) {
@@ -568,7 +577,7 @@ export const createServer = async () => {
   );
 
   app.get(
-    "/api/v1/jobs/:jobId/log/stream",
+    "/vivliostyle/jobs/:jobId/log/stream",
     asyncHandler(async (req, res) => {
       const jobId = req.params.jobId;
       const job = store.get(jobId);
@@ -608,7 +617,7 @@ export const createServer = async () => {
   );
 
   app.delete(
-    "/api/v1/jobs/:jobId",
+    "/vivliostyle/jobs/:jobId",
     asyncHandler(async (req, res) => {
       const job = store.get(req.params.jobId);
       if (!job) {
@@ -653,6 +662,7 @@ export const createServer = async () => {
 
   return { app, store, queue };
 };
+
 
 
 
