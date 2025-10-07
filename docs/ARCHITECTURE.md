@@ -1,94 +1,70 @@
-# GROWI ↔ Vivliostyle CLI 連携アーキテクチャ
+﻿# GROWI ↔ Vivliostyle CLI アーキテクチャ
 
 ## 概要
-本サービスは Vivliostyle CLI を用いて公開用成果物（標準は PDF）を生成する REST API を公開し、GROWI の Vivliostyle プラグインから呼び出されることを想定する。サーバーの責務は以下のとおり。
-
-- プラグインから届くジョブリクエストの検証と永続化。
-- プラグインがアップロードした書籍／プロジェクトの ZIP バンドル展開。
-- ジョブごとに分離されたワークスペースでの Vivliostyle CLI 実行。
-- ジョブのメタデータ、ログ、ビルド成果物の永続化と再取得。
-- HTTP エンドポイントを通じたジョブステータス・ログ・成果物の提供。
-
-永続化はサービスが動作するホストローカルで完結し、外部 DB 等は不要。
+GROWI から送信された Vivliostyle プロジェクトを受け取り、Vivliostyle CLI でビルドし、成果物（PDF など）を提供する HTTP サービス。ジョブ単位で入力・作業領域・成果物を分離し、再取得や診断が容易な構造を採用する。
 
 ## 構成要素
-- **HTTP API（Express）** – リクエストの受理／検証、成果物ダウンロード、ジョブ情報公開を担う。
-- **Job Store** – `jobs/<jobId>/job.json` にジョブ状態を記録し、タイムスタンプや CLI 終了コード、成果物メタ情報を保持する。
-- **Queue & Worker** – メモリ内キュー（PQueue）で同時実行数を制御。ワーカーがアーカイブ展開と CLI 実行を行う。
-- **Vivliostyle Runner** – 同梱された CLI エントリーポイントを `node` で起動し、標準出力／標準エラーを構造化ログとして収集するラッパー。
+- **HTTP API (Express)** – ジョブ登録・ステータス参照・成果物ダウンロード・ログ配信を担当。
+- **ジョブストア** – jobs/<jobId> 以下にリクエストスナップショット、job.json（状態）、log.ndjson（構造化ログ）、成果物を保持。
+- **ジョブキュー (PQueue)** – VIV_QUEUE_CONCURRENCY（既定 2）で同時実行を制御。ワーカーが ZIP 展開と Vivliostyle CLI 実行を行う。
+- **Vivliostyle ランナー** – CLI を子プロセスとして起動し、stdout/stderr をログ化。
+- **SSE ブロードキャスタ** – ppendLog 時に Server-Sent Events を通じてリアルタイムでログとステータス変更を配信。ジョブ完了時に接続を明示的にクローズ。
+- **リバースプロキシ (src/proxyServer.ts)** – http-proxy を用いた薄いプロキシ。TLS 終端や同一オリジン化が必要な場合に利用。
 
-## リクエストライフサイクル
-1. **ジョブ登録** (`POST /api/v1/jobs`) – プラグインが Vivliostyle プロジェクトを含む ZIP を base64 で送信。エントリーファイルや config など CLI 用ヒントは任意。
-2. **永続化** – サーバーが `jobId` を割り当て／検証し `jobs/<jobId>/request.json` を作成、ZIP を保存、初期メタデータを書き込む。
-3. **キュー投入** – ジョブをキューへ追加し、ステータスを `queued` に遷移させる。
-4. **実行** – ワーカーがステータスを `running` にし、`jobs/<jobId>/workspace` に展開、CLI 引数を決定し、作業ディレクトリを `cwd` として Vivliostyle CLI を起動。
-5. **成果物収集** – 生成ファイルを `jobs/<jobId>/output` にコピーし、ファイル名・サイズ・MIME 情報をメタデータに反映。
-6. **完了処理** – ステータスを `succeeded` もしくは `failed` に更新し、CLI ログを `jobs/<jobId>/log.ndjson` へ追記。
-7. **クライアントポーリング** – プラグインが `/api/v1/jobs/:jobId` をポーリングし、準備完了後に `/api/v1/jobs/:jobId/result` から成果物を取得。
+## ジョブフロー
+1. **登録** – POST /api/v1/jobs（JSON + base64）または POST /vivliostyle/jobs（multipart）で ZIP を受理。最大サイズは VIV_MAX_ARCHIVE_SIZE_MB（既定 500 MB）。
+2. **永続化** – jobs/<jobId> を作成し、source.zip と equest.json を書き出す。SSE で queued 配信。
+3. **実行** – ワーカーが unning に更新。ZIP を展開し 
+ode_modules/.bin/vivliostyle build を実行。
+4. **ログ中継** – stdout/stderr を NDJSON に追記しつつ GET /api/v1/jobs/:jobId/log/stream へ SSE として転送。
+5. **成果物収集** – CLI 成功時は output/ に成果物を集約し、succeeded を配信。失敗時はエラーを job.json に記録し ailed を配信。
+6. **クリーンアップ** – 入力 ZIP と workspace/ を削除（成果物は保持）。ATTACHMENT へ移送後に DELETE /api/v1/jobs/:jobId でジョブ一式を削除。
 
-## API
-- `POST /api/v1/jobs`
-  - リクエスト例:  
-    ```json
-    {
-      "jobId": "任意ID",
-      "sourceArchive": "base64-zip-string",
-      "cliOptions": {
-        "configPath": "workspace 相対パス",
-        "entry": ["任意の入力ファイル"],
-        "outputFile": "optional/output.pdf",
-        "format": "pdf|webpub|zip"
-      },
-      "metadata": {
-        "title": "任意タイトル",
-        "requestedBy": "リクエストしたユーザー識別子"
-      }
-    }
-    ```
-  - レスポンス: `{ "jobId": "...", "status": "queued", "createdAt": "ISO8601" }`
-  - 代表的エラー:
-    - `400`: ペイロード不正またはアーカイブ容量オーバー。
-    - `409`: 任意指定した `jobId` が既存ジョブと衝突。
-- `GET /api/v1/jobs/:jobId`
-  - ジョブメタ情報、タイムスタンプ、CLI 終了コード、成果物一覧、ログ末尾（最新 50 行）を返す。
-- `GET /api/v1/jobs/:jobId/result`
-  - 主要成果物（`outputFile` または最初の PDF）を `Content-Disposition: attachment` 付きでストリーム返却。
-  - `?file=relative/path` で出力ディレクトリ内の任意ファイルを取得。
-- `GET /api/v1/jobs/:jobId/log`
-  - 構造化ログをテキストストリームで返し、リアルタイムビューに利用可能。
-- `DELETE /api/v1/jobs/:jobId`
-  - プラグインからの削除シグナルを受け、ジョブディレクトリ（成果物・ログ含む）を完全削除する。`running` / `queued` / `created` の状態では `409` を返し、完了後のみ削除が可能。
+## API サーフェス
+- POST /api/v1/jobs – JSON で { sourceArchive: base64, cliOptions, metadata } を送信。
+- POST /vivliostyle/jobs – multipart/form-data で pageId/pagePath/title/zip を送信。pageId は jobId に正規化。
+- GET /api/v1/jobs/:jobId – ステータス、タイムスタンプ、成果物一覧、ログ末尾、キュー情報を返す。
+- GET /api/v1/jobs/:jobId/result – 主要成果物をストリーム返却（?file= で任意ファイル指定）。
+- GET /api/v1/jobs/:jobId/log – 既存ログ（NDJSON）をまとめて返す。
+- GET /api/v1/jobs/:jobId/log/stream – SSE。過去ログを即時送信し、以降のログとステータス更新をリアルタイムに配信。ジョブ終了時に complete イベントでクローズ。
+- DELETE /api/v1/jobs/:jobId – 成果物・ログを含むジョブディレクトリを削除。進行中は 409。
 
-## ジョブデータ構造
-```
+## データ構造
+`
 jobs/
   {jobId}/
-    request.json     # アーカイブを除いた元リクエスト
-    job.json         # 現在のステータスとメタデータ
-    source.zip       # アップロードされた ZIP
-    workspace/       # CLI の作業ディレクトリ (cwd)
-    output/          # 完了後にコピーされる成果物一式
-    log.ndjson       # timestamp, level, message を持つ構造化ログ
-```
+    request.json   # リクエストのスナップショット
+    job.json       # 現在のステータス・メタデータ
+    source.zip     # アップロードされた ZIP
+    workspace/     # 作業用ディレクトリ（完了後に削除）
+    output/        # 成果物
+    log.ndjson     # ログ（1 行 1 JSON）
+`
 
-## エラーハンドリングと復旧
-- キュー処理で失敗した場合はステータスを `failed` にし、エラー内容（`message`, `stack`）を保存。
-- CLI が非ゼロ終了してもワーカーが Job Store を更新し、標準出力／標準エラーをログに残す。
-- サーバー再起動時は既存 `job.json` を読み込み、停止時に `running` だったジョブは `server-restart` 理由付きで `failed` に更新。
+## エラーハンドリング
+- 入力検証失敗（base64 不正、サイズ超過）は 400。
+- jobId 競合は 409。
+- CLI 異常終了／タイムアウト時は job.json に rror を記録し ailed を配信。
+- キュー処理自体が失敗した場合も queue_failure として記録。
+- ジョブ削除時は SSE 接続に complete イベントを送り終了。
 
-## 設定項目
-環境変数（括弧内は既定値）:
-- `PORT` (`4781`)
-- `VIV_QUEUE_CONCURRENCY` (`1`)
-- `VIV_WORKSPACE_DIR` (`<repo>/jobs`)
-- `VIV_MAX_ARCHIVE_SIZE_MB` (`50`)
-- `VIV_CLI_TIMEOUT_MS` (`600000` = 10 分)
+## 既定設定
+| 変数 | 既定値 | 説明 |
+| --- | --- | --- |
+| VIV_QUEUE_CONCURRENCY | 2 | 同時実行するジョブ数 |
+| VIV_MAX_ARCHIVE_SIZE_MB | 500 | 受理する ZIP の最大サイズ |
+| VIV_CLI_TIMEOUT_MS | 600000 | Vivliostyle CLI 実行のタイムアウト（ms） |
+| VIV_WORKSPACE_DIR | <repo>/jobs | ジョブデータ保存先 |
+| VIV_PROXY_TARGET | http://127.0.0.1:4781 | プロキシの転送先（proxyServer 起動時） |
+| VIV_PROXY_PORT | 4871 | プロキシ待受ポート |
 
-## GROWI プラグイン連携メモ
-- プラグイン側は `vivliostyle.config.js` やエントリーファイルを含むプロジェクトを ZIP 化し、base64 化して送信する必要がある。
-- ジョブの完了監視（`status === "succeeded"`）と成果物ダウンロードはプラグインの責務。
-- 成果物を GROWI の ATTACHMENT ストレージへ移動し終えたら、`DELETE /api/v1/jobs/:jobId` を必ず呼び出し、サーバー上のジョブデータを削除する。（削除しない場合は成果物が残り続ける。）
-- `entry` を指定する場合はアップロードしたアーカイブ内に存在するワークスペース相対パスを使用すること。
-- WebPub や ZIP など別形式を出力する場合は `cliOptions.format` を設定し、ダウンロード時の MIME に留意する。
-- 監査情報として `metadata.requestedBy` に GROWI ユーザー識別子を入れることを推奨。
-- 将来的に Webhook を実装する際には `callbackUrl` を受け付ける予定だが、現時点では未対応。
+## 逆プロキシ
+src/proxyServer.ts は http-proxy を利用した薄いリバースプロキシ。VIV_PROXY_TARGET を API サーバーに設定し、
+ode dist/proxyServer.js または 	sx src/proxyServer.ts で起動する。TLS 終端や同一オリジン要件がある場合はこのプロキシの表側に HTTPS を配置する。
+
+## フロントエンド連携メモ
+- プラグインは multipart または JSON を選択可能。大容量は multipart が推奨。
+- ジョブ登録直後に GET /api/v1/jobs/:jobId をポーリング、もしくは GET /api/v1/jobs/:jobId/log/stream を接続して SSE で進捗を受信。
+- 成果物取得後は DELETE /api/v1/jobs/:jobId を呼び、サーバー上の一時ファイルを削除。
+- フロント側で ailed を受け取った場合は job.json の rror を参照して原因を表示する。
+

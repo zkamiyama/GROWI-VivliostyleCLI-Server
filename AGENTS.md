@@ -1,41 +1,49 @@
-# Vivliostyle CLI サーバーエージェント ノート
+﻿# Vivliostyle CLI サーバー エージェント ノート
 
 ## 背景
-- GROWI プラグインからのリクエストを受け取り、Vivliostyle CLI を実行して公開用成果物（デフォルトは PDF）を生成する HTTP サービスを提供する。
-- 各ジョブをサンドボックス化し、決定的な出力管理とダウンロード可能な成果物提供を保証する。
+- GROWI プラグインからのリクエストを受け取り、Vivliostyle CLI を実行して公開用成果物（PDF など）を生成する HTTP サービス。
+- 各ジョブをサンドボックス化し、入力・出力・ログを一貫して管理しつつ、再ダウンロード・調査ができるようにする。
 
 ## 実装方針
-- サーバーは Node.js（TypeScript）で実装し、HTTP レイヤーは Express を利用する。
-- Vivliostyle 実行は制御されたジョブキューで管理し、ホスト負荷を抑える。
-- 各ジョブは `jobs/<jobId>` 配下の作業領域で実行し、入力アーカイブの展開、CLI 実行、ログと出力の収集を行う。
-- ポート、同時実行数、作業ディレクトリ、CLI タイムアウトなどは環境変数で設定できるようにし、妥当なデフォルト値を用意する。
-- ジョブのメタデータはジョブディレクトリ内の JSON として保存し、再起動や事後調査に備える。
-- 実行ログは JSON Lines 形式で公開し、CLI の標準出力／標準エラーをジョブ詳細レスポンスに含める。
+- サーバーは Node.js（TypeScript）+ Express で実装し、設定は環境変数で切り替えられるようにする。
+- Vivliostyle 実行は p-queue を用いたワーカーで制御し、VIV_QUEUE_CONCURRENCY（既定 2）で同時実行数を制限。
+- 入力 ZIP は jobs/<jobId>/source.zip に保存し、作業用ディレクトリに展開後 jobs/<jobId>/workspace を破棄。成果物は jobs/<jobId>/output に保管。
+- メタデータや進捗は JSON（job.json）と構造化ログ（NDJSON）に記録し、サーバー再起動後も参照可能にする。
+- Vivliostyle CLI の出力ログを逐次収集し、SSE（Server-Sent Events）でフロントエンドへリアルタイム配信する。
 
-## API 概要
-- `POST /api/v1/jobs`
-  - ボディ: `{ jobId?, sourceArchive (base64 zip), cliOptions { config?, entry?, output?, format? }, metadata {...} }`
-  - レスポンス: `{ jobId, status, createdAt }`
-  - `jobId` が省略された場合はサーバー側で UUID を発行。
-- `GET /api/v1/jobs/:jobId`
-  - タイムスタンプ、CLI 終了コード、直近ログなどを含むステータスを返す。
-- `GET /api/v1/jobs/:jobId/result`
-  - 生成された成果物（デフォルトは PDF）をストリームで返す。`?file=` で出力内の任意ファイルを指定可能。
-- `GET /api/v1/jobs/:jobId/log`
-  - CLI の統合ログをストリームで返し、クライアントからの閲覧を容易にする。
-- `DELETE /api/v1/jobs/:jobId`
-  - GROWI プラグインからの削除シグナルに応じてジョブ一式（成果物を含む）を削除する。`running`/`queued` のジョブには 409 を返す。
+## API 一覧
+- POST /api/v1/jobs
+  - JSON ボディ（base64 エンコード ZIP）でジョブ登録。jobId 未指定時は UUID 生成。
+- POST /vivliostyle/jobs
+  - 同一オリジン向け multipart/form-data。pageId, pagePath, 	itle, zip を受理し、pageId を正規化して jobId に利用。
+- GET /api/v1/jobs/:jobId
+  - ジョブステータス・メタデータ・成果物リスト・ログ末尾を返す。
+- GET /api/v1/jobs/:jobId/result
+  - 成果物をストリーム返却。?file= で output 以下のファイルを指定。
+- GET /api/v1/jobs/:jobId/log
+  - 既存ログ（NDJSON）をまとめて返す。
+- GET /api/v1/jobs/:jobId/log/stream
+  - SSE でリアルタイムにログとステータス更新を配信。ジョブ完了時に complete イベントでクローズ。
+- DELETE /api/v1/jobs/:jobId
+  - 成果物・ログを含むジョブディレクトリを削除。進行中ジョブは 409。
 
 ## ジョブライフサイクル
-1. リクエストボディを検証し保存する。設定上限を超えるアーカイブは拒否する。
-2. アーカイブを作業領域に展開し、メタデータファイルを出力してジョブをキューに積む。
-3. ワーカーが `VIV_QUEUE_CONCURRENCY`（デフォルト 1）の制約を守りながらジョブを取り出す。
-4. 作業ディレクトリを `cwd` として `node_modules/.bin/vivliostyle build` を指定オプション付きで実行する。
-5. 生成された成果物（PDF や ZIP）は `jobs/<jobId>/output` に収集する。
-6. ジョブステータスを更新し、ダウンロード可能にする。将来的には保存期間に応じたクリーンアップを検討する。
+1. リクエスト受信・検証（VIV_MAX_ARCHIVE_SIZE_MB 既定 500 MB を超えたら拒否）。
+2. jobs/<jobId> を作成し、入力 ZIP とリクエストスナップショットを保存。
+3. ジョブをキューに投入し、SSE で queued を配信。
+4. ワーカーがジョブを取得し unning に遷移、展開→Vivliostyle CLI 実行。
+5. CLI stdout/stderr を NDJSON に追記しつつ SSE へ中継。
+6. 成功時は成果物を output/ に収集し succeeded を配信。失敗時は job.json にエラーを記録し ailed を配信。
+7. 完了後は入力 ZIP と workspace を削除（成果物は保持）。ATTACHMENT へ移送後に DELETE API でジョブごと削除。
 
-## 残課題
-- 任意の Webhook コールバック URL サポートを追加（将来対応）。
-- API エンドポイントの認証／認可を検討（初期スコープ外）。
-- 保存期限に応じたクリーンアップ処理（cron 等）の実装は範囲外のため、運用手順を文書化する。
-- フロントが ATTACHMENT へ成果物を移送後に削除リクエストを必ず送る運用を GROWI プラグイン側に明記する。
+## 既定設定
+- VIV_QUEUE_CONCURRENCY = 2
+- VIV_MAX_ARCHIVE_SIZE_MB = 500
+- VIV_CLI_TIMEOUT_MS = 600000
+- VIV_WORKSPACE_DIR = <repo>/jobs
+
+## 今後の検討事項
+- ジョブ完了通知の Webhook 対応。
+- API 認証・認可（トークン等）。
+- 古い成果物の自動削除ポリシー（cron / TTL）。
+- 逆プロキシ（src/proxyServer.ts）越しの TLS 運用。

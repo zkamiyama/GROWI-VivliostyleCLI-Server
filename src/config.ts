@@ -1,8 +1,8 @@
 import path from "node:path";
 
 const DEFAULT_PORT = 4781;
-const DEFAULT_CONCURRENCY = 1;
-const DEFAULT_MAX_ARCHIVE_MB = 50;
+const DEFAULT_CONCURRENCY = 2;
+const DEFAULT_MAX_ARCHIVE_MB = 500;
 const DEFAULT_CLI_TIMEOUT_MS = 600_000;
 
 const numberFromEnv = (value: string | undefined, fallback: number): number => {

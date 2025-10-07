@@ -2,6 +2,8 @@ import request from "supertest";
 import { beforeEach, afterEach, describe, expect, it, vi } from "vitest";
 import path from "node:path";
 import os from "node:os";
+import http from "node:http";
+import { AddressInfo } from "node:net";
 import { mkdtemp, rm, mkdir, writeFile, stat } from "node:fs/promises";
 
 const fsForMock = { mkdir, writeFile };
@@ -33,6 +35,7 @@ describe("Vivliostyle job API", () => {
   let workspaceDir: string;
   let createServer: typeof import("../src/server").createServer;
   let serverBundle: Awaited<ReturnType<typeof import("../src/server").createServer>> | undefined;
+  let httpServer: http.Server | undefined;
   const cleanupDirs: string[] = [];
 
   beforeEach(async () => {
@@ -48,6 +51,10 @@ describe("Vivliostyle job API", () => {
   afterEach(async () => {
     if (serverBundle) {
       await serverBundle.queue.onIdle();
+    }
+    if (httpServer) {
+      await new Promise<void>((resolve) => httpServer!.close(() => resolve()));
+      httpServer = undefined;
     }
     for (const dir of cleanupDirs.splice(0, cleanupDirs.length)) {
       await rm(dir, { recursive: true, force: true });
@@ -92,10 +99,82 @@ describe("Vivliostyle job API", () => {
       .expect(204);
 
     await expect(stat(jobDir)).rejects.toHaveProperty("code", "ENOENT");
+  });
 
-    await request(app)
+  it("accepts multipart form submission for vivliostyle jobs", async () => {
+    serverBundle = await createServer();
+    const { app, queue } = serverBundle;
+
+    const pageId = "page:123";
+    const response = await request(app)
+      .post("/vivliostyle/jobs")
+      .field("pageId", pageId)
+      .field("pagePath", "/docs/sample")
+      .field("title", "Multipart Job")
+      .attach("zip", Buffer.from("zip"), { filename: "book.zip", contentType: "application/zip" })
+      .expect(202);
+
+    expect(response.body.jobId).toBeDefined();
+    const jobId: string = response.body.jobId;
+    expect(jobId).toBe("page-123");
+
+    await queue.onIdle();
+
+    const status = await request(app)
       .get(`/api/v1/jobs/${jobId}`)
-      .expect(404);
+      .expect(200);
+
+    expect(status.body.status).toBe("succeeded");
+    expect(status.body.metadata.pageId).toBe(pageId);
+    expect(status.body.metadata.pagePath).toBe("/docs/sample");
+    expect(status.body.metadata.source).toBe("multipart-form");
+    expect(status.body.metadata.title).toBe("Multipart Job");
+  });
+
+  it("streams logs via SSE endpoint and closes on completion", async () => {
+    serverBundle = await createServer();
+    const { app, queue } = serverBundle;
+
+    httpServer = http.createServer(app);
+    await new Promise<void>((resolve) => httpServer!.listen(0, resolve));
+    const address = httpServer.address() as AddressInfo;
+    const baseUrl = `http://127.0.0.1:${address.port}`;
+
+    const createResponse = await request(httpServer)
+      .post("/api/v1/jobs")
+      .send({
+        sourceArchive: encode("zip"),
+        metadata: { title: "SSE Sample" },
+      })
+      .expect(202);
+
+    const jobId: string = createResponse.body.jobId;
+
+    await queue.onIdle();
+
+    const sseData = await new Promise<string>((resolve, reject) => {
+      const req = http.request(
+        `${baseUrl}/api/v1/jobs/${jobId}/log/stream`,
+        {
+          method: "GET",
+          headers: { Accept: "text/event-stream" },
+        },
+        (res) => {
+          let data = "";
+          res.on("data", (chunk) => {
+            data += chunk.toString("utf8");
+          });
+          res.on("end", () => resolve(data));
+        },
+      );
+      req.on("error", reject);
+      req.end();
+    });
+
+    expect(sseData).toContain("Job started");
+    expect(sseData).toContain("event: status");
+    expect(sseData).toContain("\"status\":\"succeeded\"");
+    expect(sseData).toContain("event: complete");
   });
 
   it("rejects invalid archives", async () => {
@@ -112,3 +191,8 @@ describe("Vivliostyle job API", () => {
     expect(response.body.error).toBe("invalid_base64");
   });
 });
+
+
+
+
+

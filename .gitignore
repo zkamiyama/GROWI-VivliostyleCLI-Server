@@ -39,3 +39,4 @@ yarn-error.log*
 !AGENTS.md
 !docs/*.md
 jobs/
+!PLUGIN.md

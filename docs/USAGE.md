@@ -1,96 +1,147 @@
-# 利用ガイド
+﻿# 利用ガイド
 
-この文書は「セットアップ方法が全く分からない」という方でもサービスを立ち上げられるよう、手順を丁寧に説明します。必要なコマンドはすべてコピーして実行できる形で記載しています。
+このドキュメントは初めてセットアップする人でも迷わないよう、手順を丁寧にまとめています。必要なコマンドはそのままコピーして実行できます。
 
-## 事前準備（初回のみ）
-1. **Node.js のインストール**  
-   - 推奨バージョン: Node.js 18.18 以上（LTS 版を推奨）。  
-   - 公式サイト <https://nodejs.org/ja/> からインストーラを取得し、画面の指示に従ってインストールしてください。
-2. **インストール確認**  
-   コマンドプロンプトやターミナルで次を実行し、バージョンが表示されれば成功です。
-   ```bash
+## 1. 事前準備
+1. **Node.js をインストール**（推奨: v18.18 以上の LTS）
+   - 公式サイト <https://nodejs.org/ja/> からインストーラを取得し、画面の指示に従ってインストールします。
+2. **インストール確認**
+   `ash
    node -v
    npm -v
-   ```
-3. **リポジトリの取得**  
-   - Git を利用できる場合:  
-     ```bash
+   `
+   バージョン番号が表示されれば準備完了です。
+3. **ソースコード取得**
+   - Git を利用する場合
+     `ash
      git clone https://example.com/your/repo.git
-     ```
-   - Git を利用しない場合は、ZIP をダウンロードして任意のフォルダに展開してください。
+     `
+   - Git を使わない場合は ZIP をダウンロードして任意の場所に展開します。
 
-## 初期セットアップ
-1. プロジェクトのルートディレクトリに移動します:
-   ```bash
+## 2. セットアップ
+1. プロジェクトディレクトリへ移動:
+   `ash
    cd GROWI-VivliostyleCLI-Server
-   ```
-2. 依存関係をインストールします（初回または依存更新後に一度実行）:  
-   `package.json` では `@vivliostyle/cli` を常に最新版で取得するよう `latest` タグを指定しています。`npm install` を実行するたび、Vivliostyle は最新リリースに差し替わります。
-   ```bash
+   `
+2. 依存パッケージをインストール（初回／更新のたびに実行）:
+   `ash
    npm install
-   ```
+   `
+   package.json では @vivliostyle/cli を latest 指定しているため、
+pm install のたびに最新リリースへ更新されます。
 
-## 開発・動作確認コマンド
-- `npm run dev`  
-  開発モードでサーバーを起動します。ソースを保存すると自動的に再起動します。
-- `npm run build`  
-  TypeScript をコンパイルして `dist/` に成果物を出力します。デプロイ前の確認に使用します。
-- `npm start`  
-  `npm run build` 実行後の成果物を Node.js で起動します。本番運用で利用する想定です。
-- `npm test`  
-  Vitest によるテストを実行します。Vivliostyle CLI 実行部分はモック化されているため高速に確認できます。
+## 3. よく使うコマンド
+- 
+pm run dev : 	sx を利用したホットリロードサーバー
+- 
+pm run build : TypeScript をコンパイルし dist/ に出力
+- 
+pm start : ビルド成果物を起動（本番用）
+- 
+pm test : Vitest によるテスト実行
+- 
+pm run proxy : 逆プロキシを 	sx で起動（開発向け）
+- 
+pm run proxy:start : ビルド済み dist/proxyServer.js を起動
 
-## 依存関係のアップデート方法
-1. どのパッケージが古いか確認:
-   ```bash
+## 4. 依存パッケージの更新
+1. どのパッケージが古いか確認
+   `ash
    npm outdated
-   ```
-2. 影響の少ない更新を一括反映（互換性のある範囲で更新）:
-   ```bash
+   `
+2. 互換性のある範囲でまとめて更新
+   `ash
    npm update
-   ```
-3. 個別パッケージを最新版に上げる場合:
-   ```bash
-   npm install <パッケージ名>@latest
-   ```
-4. 更新後は必ずテストを実行し、動作に問題がないか確認してください:
-   ```bash
+   `
+3. 特定パッケージだけ最新版にする
+   `ash
+   npm install <package>@latest
+   `
+4. 更新後は必ずテスト
+   `ash
    npm test
-   ```
+   `
 
-## アンインストール／クリーンアップ
-プロジェクトをまるごと削除したいときは、以下の手順で「インストールされたもの」をリセットできます。
+## 5. アンインストール／クリーンアップ
+- 依存パッケージをまとめて削除
+  `ash
+  rm -rf node_modules package-lock.json
+  `
+- ビルド成果物とジョブデータを削除
+  `ash
+  npm run clean
+  rimraf jobs
+  `
+- プロジェクトごと削除する場合はフォルダを削除、もしくは Git 管理下で git clean -fdx
 
-1. 依存パッケージの削除（任意）  
-   ```bash
-   npm uninstall @vivliostyle/cli express p-queue unzipper uuid zod
-   ```
-   個別にアンインストールする代わりに `rm -rf node_modules package-lock.json` で依存をまとめて消しても構いません。
-2. ビルド成果物とジョブワークスペースの削除  
-   ```bash
-   npm run clean
-   rimraf jobs
-   ```
-3. プロジェクト自体を消す場合は、フォルダを削除すれば完了です。Git 管理下なら `git clean -fdx` で未追跡ファイルを一掃できます（実行前に変更がないか確認してください）。
-
-## 環境変数（設定項目）
-環境変数を使うことで、環境に合わせた動作を簡単に切り替えられます。`.env` を用意して `npm run dev` 前に読み込むか、コマンドの先頭に `VIV_QUEUE_CONCURRENCY=2` のように付与して利用してください。
-
+## 6. 環境変数（既定値）
 | 変数 | 既定値 | 説明 |
 | --- | --- | --- |
-| `PORT` | `4781` | HTTP サーバーの待受ポート。 |
-| `VIV_WORKSPACE_DIR` | `<repo>/jobs` | ジョブワークスペースと成果物格納ルート。 |
-| `VIV_QUEUE_CONCURRENCY` | `1` | Vivliostyle CLI の同時実行数。 |
-| `VIV_MAX_ARCHIVE_SIZE_MB` | `50` | 受け付ける base64 ZIP アーカイブの最大容量（MB）。 |
-| `VIV_CLI_TIMEOUT_MS` | `600000` | Vivliostyle CLI のタイムアウト（ミリ秒）。 |
+| PORT | 4781 | API サーバーの待受ポート |
+| VIV_WORKSPACE_DIR | <repo>/jobs | ジョブデータ格納パス |
+| VIV_QUEUE_CONCURRENCY | 2 | 同時に実行する Vivliostyle ジョブ数 |
+| VIV_MAX_ARCHIVE_SIZE_MB | 500 | 受け付ける ZIP の最大サイズ |
+| VIV_CLI_TIMEOUT_MS | 600000 | Vivliostyle CLI のタイムアウト（ミリ秒） |
+| VIV_PROXY_TARGET | http://127.0.0.1:4781 | プロキシ転送先 |
+| VIV_PROXY_PORT | 4871 | プロキシ待受ポート |
 
-## 本番運用時のポイント
-1. `VIV_WORKSPACE_DIR` は十分な容量がある永続ストレージに設定。
-2. Vivliostyle CLI が利用するフォントやブラウザ依存ライブラリを事前に整備。
-3. `npm run build` → `npm start` の順で起動し、systemd/PM2 などのプロセスマネージャーで常駐化。
-4. GROWI 側プラグインの接続先を `https://<host>:PORT/api/v1/jobs` に変更し、成果物を ATTACHMENT へアップロードし終えたら `DELETE /api/v1/jobs/:jobId` を呼んでサーバー上のジョブを削除する運用を徹底。
+.env を用意して 
+pm run dev の前に読み込む、もしくはコマンドの前に VIV_QUEUE_CONCURRENCY=4 npm start のように指定してください。
 
-## トラブルシューティング
-- `npm install` でエラーが出た場合は、`node_modules` と `package-lock.json` を削除してから再実行すると解決することがあります。
-- Windows で文字化けが発生する場合は、ターミナルの文字コードを UTF-8 に変更してください。
-- Vivliostyle CLI の実行でタイムアウトした場合は、`VIV_CLI_TIMEOUT_MS` を引き上げるか、入力プロジェクトのサイズを見直してください。
+## 7. API 利用例
+### JSON API（base64 で ZIP を送信）
+`ash
+curl -X POST http://localhost:4781/api/v1/jobs \
+  -H "Content-Type: application/json" \
+  -d '{
+    "sourceArchive": "BASE64_ZIP",
+    "metadata": { "title": "My Book" }
+  }'
+`
+Base64 は元 ZIP より約 1.33 倍になるため、500 MB の制限内に収まるよう圧縮や画像最適化を行ってください。
+
+### 同一オリジン向け multipart API
+`ash
+curl -X POST http://localhost:4781/vivliostyle/jobs \
+  -F pageId=page:123 \
+  -F pagePath=/book/sample \
+  -F title="サンプル書籍" \
+  -F zip=@./project.zip
+`
+pageId は jobId に正規化されます（英数字・._- 以外は - に置換）。空になる場合は UUID が割り当てられます。
+
+### SSE でログ／ステータスを受信
+`ash
+curl -N http://localhost:4781/api/v1/jobs/<jobId>/log/stream
+`
+- data: 行にログ（JSON）が流れます。
+- vent: status で queued / unning / succeeded / ailed を受信。
+- ジョブ完了時に vent: complete が届き接続がクローズされます。
+
+### 成果物のダウンロード
+`ash
+curl -L http://localhost:4781/api/v1/jobs/<jobId>/result -o output.pdf
+`
+任意ファイルを取得したい場合は ?file=relative/path を付与します。
+
+### 処理後のクリーンアップ
+`ash
+curl -X DELETE http://localhost:4781/api/v1/jobs/<jobId>
+`
+ATTACHMENT へ成果物を移した後に必ず実行し、サーバー上の一時ファイルを削除してください。
+
+## 8. 逆プロキシの利用
+src/proxyServer.ts は http-proxy を使った簡易リバースプロキシです。
+`ash
+npm run proxy        # tsx を使った開発起動
+npm run proxy:start  # dist/proxyServer.js を実行
+`
+環境変数 VIV_PROXY_TARGET で転送先 API、VIV_PROXY_PORT で待受ポートを指定します。TLS 終端を前段に置きたい場合は、このプロキシを HTTPS の背後に配置してください。
+
+## 9. トラブルシューティング
+- 
+pm install に失敗する: m -rf node_modules package-lock.json でキャッシュを削除し再実行。
+- Windows で文字化けする: ターミナルの文字コードを UTF-8 に変更。
+- Vivliostyle CLI がタイムアウトする: VIV_CLI_TIMEOUT_MS を引き上げるか、入力のサイズ・複雑さを見直す。
+- SSE が届かない: ブラウザが HTTP/1.1 でアクセスしているかを確認し、リバースプロキシのバッファリング（X-Accel-Buffering: no 等）を無効化する。
+
