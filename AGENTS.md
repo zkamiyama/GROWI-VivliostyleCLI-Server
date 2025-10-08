@@ -1287,32 +1287,5 @@ app.listen(port, () => console.log(`server on :${port}`));
 - **GROWI添付APIはmultipart・サイズ上限・署名URL期限**を意識し、**トークンは最小権限で管理**。[MDNウェブドキュメント](https://developer.mozilla.org/en-US/docs/Web/API/Server-sent_events?utm_source=chatgpt.com)
 
 ## TODO
-はい、すべてを /vivliostyle/jobs 配下へ統一することは可能です。現状は次のように登録系と参照系が混在しています:
-
-POST /vivliostyle/jobs … multipart 専用
-POST /api/v1/jobs … JSON＋base64 専用
-GET/DELETE /api/v1/jobs/... … ステータス・成果物・ログ・削除
-同一オリジン運用に絞りたいなら、以下のどちらかの方針で /vivliostyle/jobs に一本化できます。
-
-登録系だけ /vivliostyle/jobs にまとめる
-/api/v1/jobs を廃止し、/vivliostyle/jobs で multipart だけを受け付ける構成に変更。
-→ フロント／ドキュメント／テストすべてで新パスを使うよう修正。
-
-すべての API を /vivliostyle/jobs/... に付け替える
-
-GET /vivliostyle/jobs/:jobId
-GET /vivliostyle/jobs/:jobId/result
-GET /vivliostyle/jobs/:jobId/log
-GET /vivliostyle/jobs/:jobId/log/stream
-DELETE /vivliostyle/jobs/:jobId
-というようにルーティングを揃え、既存 /api/v1/jobs/... は互換用としてしばらく残すか廃止するか選択します。
-その際に必要になる作業は:
-
-src/server.ts のルーティングとバリデーション変更
-フロント側の fetch 先 URL を更新（PLUGIN.md の手順含む）
-ドキュメント（AGENTS.md / ARCHITECTURE.md / USAGE.md / PLUGIN.md）を /vivliostyle/jobs 系に書き換える
-テストのパスを更新し再実行
-旧パスを使っている外部からの呼び出しがある場合は移行期間の検討
-柔軟性（外部システムから JSON で投げたい等）が不要なら、この統一案のほうが構成はすっきりします。逆に将来的に外部連携を想定するなら、現行の「公開 API は /api/v1/jobs、内部用途は /vivliostyle/jobs」という併存のままのほうが汎用性は高い、という判断になります。
-
-全部/vivliostyle/jobsに統一して。
+- API パスはすべて `/vivliostyle/jobs` 系で統一済み。ドキュメント・テスト・実装が同じ前提になっているか継続的に確認すること。
+- 旧 `/api/v1/jobs` への呼び出しが残っていないか、外部ツールや CI の設定も含めて棚卸しすること。

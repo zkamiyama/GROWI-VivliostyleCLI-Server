@@ -1,26 +1,25 @@
-﻿# GROWI Vivliostyle プラグイン実装ガイド
+# GROWI Vivliostyle プラグインガイド
 
-このドキュメントは GROWI 側プラグインから本サーバー API を利用するための実装指針です。
+このドキュメントは、GROWI 側プラグインから本サーバーの API を利用して Vivliostyle CLI ジョブを実行する際の手順と注意点をまとめたものです。
 
 ## 1. エンドポイント一覧
 | メソッド | パス | 用途 |
 | --- | --- | --- |
-| POST | /vivliostyle/jobs | 同一オリジン向けの multipart/form-data 受付 |
-| POST | /api/v1/jobs | JSON + base64 受付。クロスオリジンで利用する場合はこちら |
-| GET | /api/v1/jobs/:jobId | ジョブの状態・成果物リストを取得 |
-| GET | /api/v1/jobs/:jobId/log/stream | SSE でログ・ステータスをリアルタイム受信 |
-| GET | /api/v1/jobs/:jobId/result | 成果物（PDF など）をダウンロード |
-| DELETE | /api/v1/jobs/:jobId | ジョブディレクトリの削除 |
+| POST | /vivliostyle/jobs | application/json（sourceArchive を base64 で送信）または multipart/form-data（pageId/pagePath/title/zip）を受理 |
+| GET | /vivliostyle/jobs/:jobId | ジョブの状態・成果物リスト・ログ末尾・キュー情報を取得 |
+| GET | /vivliostyle/jobs/:jobId/log/stream | SSE でログとステータス更新をリアルタイム受信 |
+| GET | /vivliostyle/jobs/:jobId/result | 成果物（PDF など）をダウンロード。`?file=` で相対パス指定可 |
+| DELETE | /vivliostyle/jobs/:jobId | ジョブディレクトリを削除（進行中は 409 を返却） |
 
 ## 2. 推奨ワークフロー
 1. **ZIP アーカイブ作成**
-   - 対象ページの HTML/Markdown、ivliostyle.config.js、CSS、画像などをまとめて ZIP。
-   - 不要ファイル（node_modules など）は除去し、500 MB の制限内に抑える。
-2. **ジョブ登録**（同一オリジンの場合）
-   `	s
+   - 対象ページの HTML/Markdown、vivliostyle.config.js、CSS、画像・フォントなどをまとめて ZIP 化。
+   - 不要なファイル（`node_modules` など）は除去し、500 MB の上限内に収める。
+2. **ジョブ登録（同一オリジン例）**
+   ```ts
    const form = new FormData();
    form.append("pageId", pageId);      // 例: "page:123"
-   form.append("pagePath", pagePath);  // GROWI のパス
+   form.append("pagePath", pagePath);  // GROWI 上のパス
    form.append("title", title);
    form.append("zip", fileBlob, "project.zip");
 
@@ -29,17 +28,18 @@
      body: form,
    });
    const { jobId } = await res.json();
-   `
-   - JSON で送信する場合は /api/v1/jobs に sourceArchive を base64 文字列で設定。
+   ```
+   - application/json で送信する場合は `sourceArchive` に base64 文字列を設定する。
 3. **進捗監視**
-   - SSE を利用してログとステータスを受信する。
-   `	s
-   const source = new EventSource(/api/v1/jobs//log/stream);
+   - SSE を用いてログとステータスをリアルタイムに受信。
+   ```ts
+   const source = new EventSource(`/vivliostyle/jobs/${jobId}/log/stream`);
 
-   source.onmessage = (event) => {
+      source.addEventListener("jobs", (event) => {
      const payload = JSON.parse(event.data);
-     appendLog(payload);
-   };
+     appendLog(payload); // payload.message は常に "[jobs] ..." 形式
+   });
+   });
 
    source.addEventListener("status", (event) => {
      const { status } = JSON.parse(event.data);
@@ -55,34 +55,35 @@
        showError(meta);
      }
    });
-   `
-   - SSE が使えない環境では GET /api/v1/jobs/:jobId を数秒おきにポーリング。
+   ```
+   - SSE は `event: jobs`（ログ）と `event: status`（状態更新）で届きます。対応していない環境では `GET /vivliostyle/jobs/:jobId` を数秒おきにポーリングする。
+   - ログの `message` は `[jobs]` プレフィックス付きで送信されるため、UI でそのまま表示すると区別しやすくなります。
 4. **成果物ダウンロード**
-   `	s
-   const res = await fetch(/api/v1/jobs//result);
+   ```ts
+   const res = await fetch(`/vivliostyle/jobs/${jobId}/result`);
    const blob = await res.blob();
-   await uploadToAttachment(blob, ${title}.pdf);
-   `
-   - 追加ファイルが必要な場合は ?file=relative/path を付与。
+   await uploadToAttachment(blob, `${title}.pdf`);
+   ```
+   - 追加ファイルが必要な場合は `?file=relative/path` を付与して取得する。
 5. **クリーンアップ**
-   - ATTACHMENT への保存が完了したら DELETE /api/v1/jobs/:jobId を呼び出し、サーバー上のジョブディレクトリを削除。
+   - ATTACHMENT への保存が完了したら `DELETE /vivliostyle/jobs/:jobId` を呼び、サーバー上のジョブディレクトリを削除する（一定時間後には自動削除されるが、明示的なクリーンアップを推奨）。
 
 ## 3. エラー処理
-- API が 400 を返す場合は入力不備。ユーザー向けにメッセージを表示。
-- 409 はジョブ ID の重複またはジョブが進行中。ID を変えるか完了を待つ。
-- SSE で status: failed を受け取ったら、complete イベントに含まれる eason / message を確認し、UI に表示。
+- 400 系は入力不備。詳細メッセージを利用者に表示して再送を促す。
+- 409 はジョブ ID の重複またはジョブが進行中。ID を変更するか完了を待つ。
+- SSE で `status: failed` を受け取った場合は `complete` イベントの `reason` / `message` を確認し、UI に表示する。
 
-## 4. 逆プロキシ越しの利用
-- GROWI と同じオリジンで扱いたい場合は 
-pm run proxy で起動するプロキシを経由させる。
-- SSE を通すため、プロキシでは HTTP/1.1 を維持し、X-Accel-Buffering: no や Cache-Control: no-cache を設定する。
+## 4. プロキシ越しの利用
+- GROWI と同一オリジンで扱いたい場合は `npm run proxy` で提供されるリバースプロキシを経由させる。
+- SSE を通すため、プロキシでは HTTP/1.1 を維持し、`X-Accel-Buffering: no` と `Cache-Control: no-cache` を設定する。
 
 ## 5. チェックリスト
-- [ ] ZIP に不要ファイルを含めない
-- [ ] 500MB 超過時に警告を出す
-- [ ] SSE 非対応環境向けにポーリングをフォールバック
-- [ ] 成果物保存後に DELETE を必ず実行
-- [ ] 失敗時に job.json.error を UI に表示
+- [ ] ZIP に不要ファイルを含めていないか
+- [ ] 500 MB 超過時に警告を表示できるか
+- [ ] SSE 非対応環境向けのポーリング fallback があるか
+- [ ] 成果物保存後に DELETE を確実に実行しているか
+- [ ] 失敗時に `job.json.error` の内容を UI に表示しているか
 
-本ガイドに従うことで、Vivliostyle サーバーと GROWI プラグインを安全かつ効率的に連携できます。
+このガイドに従うことで、Vivliostyle サーバーと GROWI プラグインを安全かつ効率的に連携できます。
+
 

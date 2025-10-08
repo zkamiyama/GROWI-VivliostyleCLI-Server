@@ -90,6 +90,7 @@ export const createServer = async () => {
   };
 
   const logStreamClients = new Map<string, Set<LogSseClient>>();
+  const autoCleanupTimers = new Map<string, NodeJS.Timeout>();
 
   const writeToClients = (jobId: string, chunk: string) => {
     const clients = logStreamClients.get(jobId);
@@ -110,7 +111,7 @@ export const createServer = async () => {
   };
 
   const broadcastLogEntry = (jobId: string, entry: LogEntry) => {
-    writeToClients(jobId, `data: ${JSON.stringify(entry)}\n\n`);
+    writeToClients(jobId, `event: jobs\ndata: ${JSON.stringify(entry)}\n\n`);
   };
 
   const broadcastStatus = (jobId: string, status: JobStatus) => {
@@ -160,9 +161,121 @@ export const createServer = async () => {
     logStreamClients.delete(jobId);
   };
 
+  const withJobsPrefix = (entry: LogEntry): LogEntry => {
+    if (entry.message.startsWith("[jobs]")) {
+      return entry;
+    }
+    return {
+      ...entry,
+      message: `[jobs] ${entry.message}`,
+    };
+  };
+
   const appendLogEntry = async (jobId: string, entry: LogEntry) => {
-    await store.appendLog(jobId, entry);
-    broadcastLogEntry(jobId, entry);
+    const normalized = withJobsPrefix(entry);
+    await store.appendLog(jobId, normalized);
+    broadcastLogEntry(jobId, normalized);
+  };
+
+  const logJob = (
+    jobId: string,
+    message: string,
+    level: LogEntry["level"] = "info",
+    details?: Record<string, unknown>,
+  ) => appendLogEntry(jobId, {
+    timestamp: new Date().toISOString(),
+    level,
+    message,
+    details,
+  });
+
+  const cancelAutoCleanup = async (jobId: string, reason: string) => {
+    const timer = autoCleanupTimers.get(jobId);
+    if (!timer) {
+      return;
+    }
+    clearTimeout(timer);
+    autoCleanupTimers.delete(jobId);
+    if (store.get(jobId)) {
+      await logJob(jobId, `Auto-cleanup timer cancelled (${reason})`, "debug");
+    }
+  };
+
+  const probeFrontend = async (jobId: string): Promise<void> => {
+    if (!config.frontendPingUrl) {
+      await logJob(jobId, "Frontend probe skipped (VIV_FRONTEND_PING_URL not set)", "debug");
+      return;
+    }
+    const timeout = config.frontendPingTimeoutMs;
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeout);
+    try {
+      const response = await fetch(config.frontendPingUrl, {
+        method: "HEAD",
+        signal: controller.signal,
+        headers: {
+          "cache-control": "no-cache",
+        },
+      });
+      await logJob(jobId, "Frontend probe completed", response.ok ? "debug" : "warn", {
+        url: config.frontendPingUrl,
+        status: response.status,
+        ok: response.ok,
+      });
+    } catch (error) {
+      const level: LogEntry["level"] = (error as Error).name === "AbortError" ? "warn" : "error";
+      await logJob(jobId, "Frontend probe failed", level, {
+        url: config.frontendPingUrl,
+        error: (error as Error).message,
+      });
+    } finally {
+      clearTimeout(timer);
+    }
+  };
+
+  const handleAutoCleanup = async (jobId: string): Promise<void> => {
+    autoCleanupTimers.delete(jobId);
+    const job = store.get(jobId);
+    if (!job) {
+      return;
+    }
+    await logJob(jobId, "Auto-cleanup timer expired; probing frontend before cleanup", "info", {
+      timeoutMs: config.autoCleanupTimeoutMs,
+    });
+    await probeFrontend(jobId);
+    try {
+      await logJob(jobId, "Auto-cleanup removing job directory", "info");
+      await store.deleteJob(jobId);
+      closeLogStreamClients(jobId, { status: job.status, reason: "auto_cleanup" });
+      logger.info(`[jobs] Auto-cleanup removed job ${jobId}`);
+    } catch (error) {
+      logger.error(`Auto-cleanup failed for job ${jobId}`, { error });
+      await logJob(jobId, "Auto-cleanup failed", "error", {
+        error: (error as Error).message,
+      });
+    }
+  };
+
+  const scheduleAutoCleanup = async (jobId: string, status: JobStatus) => {
+    if (config.autoCleanupTimeoutMs <= 0) {
+      await logJob(jobId, "Auto-cleanup disabled (timeout <= 0)", "debug", { status });
+      return;
+    }
+    await cancelAutoCleanup(jobId, "reschedule");
+    const due = new Date(Date.now() + config.autoCleanupTimeoutMs).toISOString();
+    autoCleanupTimers.set(
+      jobId,
+      setTimeout(() => {
+        void handleAutoCleanup(jobId).catch((error) => {
+          logger.error(`Auto-cleanup handler failed for job ${jobId}`, { error });
+        });
+      }, config.autoCleanupTimeoutMs),
+    );
+    await logJob(jobId, "Auto-cleanup timer armed", "info", {
+      status,
+      timeoutMs: config.autoCleanupTimeoutMs,
+      dueAt: due,
+    });
   };
   const multipartJobHandler = asyncHandler(async (req, res) => {
     const file = req.file;
@@ -276,7 +389,19 @@ export const createServer = async () => {
       }
 
       try {
+        await appendLogForJob({
+          timestamp: new Date().toISOString(),
+          level: "info",
+          message: "Extracting archive to workspace",
+          details: { workspaceDir },
+        });
         await extractZipArchive(archivePath, workspaceDir);
+        await appendLogForJob({
+          timestamp: new Date().toISOString(),
+          level: "info",
+          message: "Archive extracted",
+          details: { workspaceDir },
+        });
 
         const safeOutputRelative = toSafeRelativePath(
           job.cliOptions.outputFile,
@@ -285,6 +410,12 @@ export const createServer = async () => {
         const outputAbsolute = path.resolve(outputDir, safeOutputRelative);
 
         await mkdir(path.dirname(outputAbsolute), { recursive: true });
+        await appendLogForJob({
+          timestamp: new Date().toISOString(),
+          level: "debug",
+          message: "Ensured output directory exists",
+          details: { outputRelative: safeOutputRelative },
+        });
 
         await store.update(jobId, {
           artifact: {
@@ -292,17 +423,42 @@ export const createServer = async () => {
             files: [],
           },
         });
+        await appendLogForJob({
+          timestamp: new Date().toISOString(),
+          level: "debug",
+          message: "Job record updated with primary artifact placeholder",
+          details: { outputRelative: safeOutputRelative },
+        });
 
         const effectiveOptions = {
           ...job.cliOptions,
           outputFile: outputAbsolute,
         };
+        await appendLogForJob({
+          timestamp: new Date().toISOString(),
+          level: "info",
+          message: "Launching Vivliostyle CLI",
+          details: {
+            outputFile: safeOutputRelative,
+            entries: effectiveOptions.entry,
+          },
+        });
 
         const result = await runVivliostyle({
           jobId,
           workspaceDir,
           cliOptions: effectiveOptions,
           appendLog: appendLogForJob,
+        });
+        await appendLogForJob({
+          timestamp: new Date().toISOString(),
+          level: result.timedOut ? "warn" : "info",
+          message: "Vivliostyle CLI completed",
+          details: {
+            exitCode: result.exitCode,
+            signal: result.signal ?? undefined,
+            timedOut: result.timedOut,
+          },
         });
 
         if (result.exitCode !== 0 || result.timedOut) {
@@ -324,13 +480,29 @@ export const createServer = async () => {
             exitCode: result.exitCode,
             timedOut: result.timedOut,
           });
+          await scheduleAutoCleanup(jobId, "failed");
           return;
         }
 
-        await store.recordArtifactManifest(jobId);
+        const manifest = await store.recordArtifactManifest(jobId);
+        await appendLogForJob({
+          timestamp: new Date().toISOString(),
+          level: "info",
+          message: "Artifact manifest recorded",
+          details: {
+            files: manifest.files.length,
+            primaryFile: manifest.primaryFile,
+          },
+        });
         await store.markStatus(jobId, "succeeded");
+        await appendLogForJob({
+          timestamp: new Date().toISOString(),
+          level: "info",
+          message: "Job marked as succeeded",
+        });
         broadcastStatus(jobId, "succeeded");
         closeLogStreamClients(jobId, { status: "succeeded" });
+        await scheduleAutoCleanup(jobId, "succeeded");
       } catch (error) {
         await appendLogForJob({
           timestamp: new Date().toISOString(),
@@ -350,9 +522,20 @@ export const createServer = async () => {
           reason: "job_failure",
           message: (error as Error).message,
         });
+        await scheduleAutoCleanup(jobId, "failed");
       } finally {
         try {
+          await appendLogForJob({
+            timestamp: new Date().toISOString(),
+            level: "debug",
+            message: "Cleaning up temporary input artifacts",
+          });
           await store.cleanupInput(jobId);
+          await appendLogForJob({
+            timestamp: new Date().toISOString(),
+            level: "debug",
+            message: "Temporary input artifacts removed",
+          });
         } catch (cleanupError) {
           logger.warn(`Cleanup failed for job ${jobId}`, {
             error: (cleanupError as Error).message,
@@ -435,9 +618,16 @@ export const createServer = async () => {
       requestSnapshot,
     });
 
+    await logJob(jobId, "Job registered", "info", {
+      archiveBytes: archiveBuffer.length,
+      requestSource: requestSnapshot.source ?? metadata?.source ?? "unknown",
+    });
+
     await store.markStatus(jobId, "queued");
     broadcastStatus(jobId, "queued");
+    await logJob(jobId, "Job status updated to queued", "debug");
     scheduleJob(jobId);
+    await logJob(jobId, "Job submitted to execution queue", "debug");
 
     return { jobId, createdAt };
   };
@@ -533,6 +723,10 @@ export const createServer = async () => {
         return;
       }
 
+      await logJob(job.jobId, "Result download requested", "info", {
+        file: targetFile,
+      });
+
       const stream = store.createArtifactReadStream(job.jobId, targetFile);
       stream.on("error", (error) => {
         logger.error(`Failed to stream artifact ${targetFile}`, { error });
@@ -600,7 +794,7 @@ export const createServer = async () => {
       const existingLog = await store.readLog(jobId);
       if (existingLog) {
         for (const line of existingLog.split(/\r?\n/).filter(Boolean)) {
-          res.write(`data: ${line}\n\n`);
+          res.write(`event: jobs\ndata: ${line}\n\n`);
         }
       }
 
@@ -630,6 +824,8 @@ export const createServer = async () => {
         return;
       }
 
+      await logJob(job.jobId, "Manual delete requested", "info");
+      await cancelAutoCleanup(job.jobId, "manual_delete");
       await store.deleteJob(job.jobId);
       closeLogStreamClients(job.jobId, { status: job.status, reason: "job_deleted" });
       logger.info(`Job ${job.jobId} deleted on request`);

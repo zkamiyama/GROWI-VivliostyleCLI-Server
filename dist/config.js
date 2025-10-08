@@ -9,12 +9,21 @@ const DEFAULT_PORT = 4781;
 const DEFAULT_CONCURRENCY = 2;
 const DEFAULT_MAX_ARCHIVE_MB = 500;
 const DEFAULT_CLI_TIMEOUT_MS = 600_000;
+const DEFAULT_AUTOCLEANUP_TIMEOUT_MS = 900_000;
+const DEFAULT_FRONTEND_PING_TIMEOUT_MS = 3_000;
 const numberFromEnv = (value, fallback) => {
     if (!value) {
         return fallback;
     }
     const parsed = Number(value);
     return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+};
+const numberFromEnvAllowZero = (value, fallback) => {
+    if (value === undefined) {
+        return fallback;
+    }
+    const parsed = Number(value);
+    return Number.isFinite(parsed) && parsed >= 0 ? parsed : fallback;
 };
 exports.config = {
     port: numberFromEnv(process.env.PORT, DEFAULT_PORT),
@@ -24,5 +33,8 @@ exports.config = {
         1024 *
         1024,
     cliTimeoutMs: numberFromEnv(process.env.VIV_CLI_TIMEOUT_MS, DEFAULT_CLI_TIMEOUT_MS),
+    autoCleanupTimeoutMs: numberFromEnvAllowZero(process.env.VIV_AUTOCLEANUP_TIMEOUT_MS, DEFAULT_AUTOCLEANUP_TIMEOUT_MS),
+    frontendPingUrl: process.env.VIV_FRONTEND_PING_URL ?? "",
+    frontendPingTimeoutMs: numberFromEnvAllowZero(process.env.VIV_FRONTEND_PING_TIMEOUT_MS, DEFAULT_FRONTEND_PING_TIMEOUT_MS),
 };
 //# sourceMappingURL=config.js.map

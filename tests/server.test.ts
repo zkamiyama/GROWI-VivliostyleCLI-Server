@@ -5,6 +5,7 @@ import os from "node:os";
 import http from "node:http";
 import { AddressInfo } from "node:net";
 import { mkdtemp, rm, mkdir, writeFile, stat } from "node:fs/promises";
+import type { ServiceConfig } from "../src/config";
 
 const fsForMock = { mkdir, writeFile };
 const pathForMock = path;
@@ -36,6 +37,7 @@ describe("Vivliostyle job API", () => {
   let createServer: typeof import("../src/server").createServer;
   let serverBundle: Awaited<ReturnType<typeof import("../src/server").createServer>> | undefined;
   let httpServer: http.Server | undefined;
+  let runtimeConfig: ServiceConfig;
   const cleanupDirs: string[] = [];
 
   beforeEach(async () => {
@@ -46,6 +48,9 @@ describe("Vivliostyle job API", () => {
     process.env.VIV_WORKSPACE_DIR = workspaceDir;
     process.env.VIV_QUEUE_CONCURRENCY = "1";
     ({ createServer } = await import("../src/server"));
+    runtimeConfig = (await import("../src/config")).config;
+    runtimeConfig.autoCleanupTimeoutMs = 0;
+    runtimeConfig.frontendPingUrl = "";
   });
 
   afterEach(async () => {
@@ -59,6 +64,9 @@ describe("Vivliostyle job API", () => {
     for (const dir of cleanupDirs.splice(0, cleanupDirs.length)) {
       await rm(dir, { recursive: true, force: true });
     }
+    runtimeConfig.autoCleanupTimeoutMs = 0;
+    runtimeConfig.frontendPingUrl = "";
+    vi.useRealTimers();
     serverBundle = undefined;
   });
 
@@ -67,7 +75,7 @@ describe("Vivliostyle job API", () => {
     const { app, queue } = serverBundle;
 
     const postResponse = await request(app)
-      .post("/api/v1/jobs")
+      .post("/vivliostyle/jobs")
       .send({
         sourceArchive: encode("zip"),
         cliOptions: { outputFile: "artifacts/book.pdf" },
@@ -81,7 +89,7 @@ describe("Vivliostyle job API", () => {
     await queue.onIdle();
 
     const statusResponse = await request(app)
-      .get(`/api/v1/jobs/${jobId}`)
+      .get(`/vivliostyle/jobs/${jobId}`)
       .expect(200);
 
     expect(statusResponse.body.status).toBe("succeeded");
@@ -95,7 +103,7 @@ describe("Vivliostyle job API", () => {
     await expect(stat(path.join(jobDir, "workspace"))).rejects.toHaveProperty("code", "ENOENT");
 
     await request(app)
-      .delete(`/api/v1/jobs/${jobId}`)
+      .delete(`/vivliostyle/jobs/${jobId}`)
       .expect(204);
 
     await expect(stat(jobDir)).rejects.toHaveProperty("code", "ENOENT");
@@ -121,7 +129,7 @@ describe("Vivliostyle job API", () => {
     await queue.onIdle();
 
     const status = await request(app)
-      .get(`/api/v1/jobs/${jobId}`)
+      .get(`/vivliostyle/jobs/${jobId}`)
       .expect(200);
 
     expect(status.body.status).toBe("succeeded");
@@ -141,7 +149,7 @@ describe("Vivliostyle job API", () => {
     const baseUrl = `http://127.0.0.1:${address.port}`;
 
     const createResponse = await request(httpServer)
-      .post("/api/v1/jobs")
+      .post("/vivliostyle/jobs")
       .send({
         sourceArchive: encode("zip"),
         metadata: { title: "SSE Sample" },
@@ -154,7 +162,7 @@ describe("Vivliostyle job API", () => {
 
     const sseData = await new Promise<string>((resolve, reject) => {
       const req = http.request(
-        `${baseUrl}/api/v1/jobs/${jobId}/log/stream`,
+        `${baseUrl}/vivliostyle/jobs/${jobId}/log/stream`,
         {
           method: "GET",
           headers: { Accept: "text/event-stream" },
@@ -182,13 +190,41 @@ describe("Vivliostyle job API", () => {
     const { app } = serverBundle;
 
     const response = await request(app)
-      .post("/api/v1/jobs")
+      .post("/vivliostyle/jobs")
       .send({
         sourceArchive: "%%%invalid%%%",
       });
 
     expect(response.status).toBe(400);
     expect(response.body.error).toBe("invalid_base64");
+  });
+
+  it("cleans up job directory automatically when delete is not called", async () => {
+    runtimeConfig.autoCleanupTimeoutMs = 200;
+
+    serverBundle = await createServer();
+    const { app, queue, store } = serverBundle;
+
+    const postResponse = await request(app)
+      .post("/vivliostyle/jobs")
+      .send({
+        sourceArchive: encode("zip"),
+        metadata: { title: "Auto Cleanup" },
+      })
+      .expect(202);
+
+    const jobId: string = postResponse.body.jobId;
+
+    await queue.onIdle();
+
+    const jobDir = path.join(workspaceDir, jobId);
+    const jobDirStat = await stat(jobDir);
+    expect(jobDirStat.isDirectory()).toBe(true);
+
+    await new Promise((resolve) => setTimeout(resolve, 300));
+
+    await expect(stat(jobDir)).rejects.toHaveProperty("code", "ENOENT");
+    expect(store.get(jobId)).toBeUndefined();
   });
 });
 

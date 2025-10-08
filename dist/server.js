@@ -104,6 +104,7 @@ const createServer = async () => {
     const store = await (0, jobStore_1.createJobStore)();
     const queue = new jobQueue_1.JobQueue(config_1.config.concurrency);
     const logStreamClients = new Map();
+    const autoCleanupTimers = new Map();
     const writeToClients = (jobId, chunk) => {
         const clients = logStreamClients.get(jobId);
         if (!clients) {
@@ -122,7 +123,7 @@ const createServer = async () => {
         }
     };
     const broadcastLogEntry = (jobId, entry) => {
-        writeToClients(jobId, `data: ${JSON.stringify(entry)}\n\n`);
+        writeToClients(jobId, `event: jobs\ndata: ${JSON.stringify(entry)}\n\n`);
     };
     const broadcastStatus = (jobId, status) => {
         writeToClients(jobId, `event: status\ndata: ${JSON.stringify({ status })}\n\n`);
@@ -168,10 +169,184 @@ const createServer = async () => {
         }
         logStreamClients.delete(jobId);
     };
-    const appendLogEntry = async (jobId, entry) => {
-        await store.appendLog(jobId, entry);
-        broadcastLogEntry(jobId, entry);
+    const withJobsPrefix = (entry) => {
+        if (entry.message.startsWith("[jobs]")) {
+            return entry;
+        }
+        return {
+            ...entry,
+            message: `[jobs] ${entry.message}`,
+        };
     };
+    const appendLogEntry = async (jobId, entry) => {
+        const normalized = withJobsPrefix(entry);
+        await store.appendLog(jobId, normalized);
+        broadcastLogEntry(jobId, normalized);
+    };
+    const logJob = (jobId, message, level = "info", details) => appendLogEntry(jobId, {
+        timestamp: new Date().toISOString(),
+        level,
+        message,
+        details,
+    });
+    const cancelAutoCleanup = async (jobId, reason) => {
+        const timer = autoCleanupTimers.get(jobId);
+        if (!timer) {
+            return;
+        }
+        clearTimeout(timer);
+        autoCleanupTimers.delete(jobId);
+        if (store.get(jobId)) {
+            await logJob(jobId, `Auto-cleanup timer cancelled (${reason})`, "debug");
+        }
+    };
+    const probeFrontend = async (jobId) => {
+        if (!config_1.config.frontendPingUrl) {
+            await logJob(jobId, "Frontend probe skipped (VIV_FRONTEND_PING_URL not set)", "debug");
+            return;
+        }
+        const timeout = config_1.config.frontendPingTimeoutMs;
+        const controller = new AbortController();
+        const timer = setTimeout(() => controller.abort(), timeout);
+        try {
+            const response = await fetch(config_1.config.frontendPingUrl, {
+                method: "HEAD",
+                signal: controller.signal,
+                headers: {
+                    "cache-control": "no-cache",
+                },
+            });
+            await logJob(jobId, "Frontend probe completed", response.ok ? "debug" : "warn", {
+                url: config_1.config.frontendPingUrl,
+                status: response.status,
+                ok: response.ok,
+            });
+        }
+        catch (error) {
+            const level = error.name === "AbortError" ? "warn" : "error";
+            await logJob(jobId, "Frontend probe failed", level, {
+                url: config_1.config.frontendPingUrl,
+                error: error.message,
+            });
+        }
+        finally {
+            clearTimeout(timer);
+        }
+    };
+    const handleAutoCleanup = async (jobId) => {
+        autoCleanupTimers.delete(jobId);
+        const job = store.get(jobId);
+        if (!job) {
+            return;
+        }
+        await logJob(jobId, "Auto-cleanup timer expired; probing frontend before cleanup", "info", {
+            timeoutMs: config_1.config.autoCleanupTimeoutMs,
+        });
+        await probeFrontend(jobId);
+        try {
+            await logJob(jobId, "Auto-cleanup removing job directory", "info");
+            await store.deleteJob(jobId);
+            closeLogStreamClients(jobId, { status: job.status, reason: "auto_cleanup" });
+            logger_1.logger.info(`[jobs] Auto-cleanup removed job ${jobId}`);
+        }
+        catch (error) {
+            logger_1.logger.error(`Auto-cleanup failed for job ${jobId}`, { error });
+            await logJob(jobId, "Auto-cleanup failed", "error", {
+                error: error.message,
+            });
+        }
+    };
+    const scheduleAutoCleanup = async (jobId, status) => {
+        if (config_1.config.autoCleanupTimeoutMs <= 0) {
+            await logJob(jobId, "Auto-cleanup disabled (timeout <= 0)", "debug", { status });
+            return;
+        }
+        await cancelAutoCleanup(jobId, "reschedule");
+        const due = new Date(Date.now() + config_1.config.autoCleanupTimeoutMs).toISOString();
+        autoCleanupTimers.set(jobId, setTimeout(() => {
+            void handleAutoCleanup(jobId).catch((error) => {
+                logger_1.logger.error(`Auto-cleanup handler failed for job ${jobId}`, { error });
+            });
+        }, config_1.config.autoCleanupTimeoutMs));
+        await logJob(jobId, "Auto-cleanup timer armed", "info", {
+            status,
+            timeoutMs: config_1.config.autoCleanupTimeoutMs,
+            dueAt: due,
+        });
+    };
+    const multipartJobHandler = asyncHandler(async (req, res) => {
+        const file = req.file;
+        if (!file?.buffer?.length) {
+            throw new HttpError(400, { error: "zip_missing" });
+        }
+        const pageId = typeof req.body?.pageId === "string" ? req.body.pageId : undefined;
+        const pagePath = typeof req.body?.pagePath === "string" ? req.body.pagePath : undefined;
+        const rawTitle = typeof req.body?.title === "string" ? req.body.title.trim() : undefined;
+        const metadata = {
+            title: rawTitle || undefined,
+            pageId,
+            pagePath,
+            source: "multipart-form",
+        };
+        const { jobId, createdAt } = await submitJob({
+            jobIdInput: normalizeJobIdCandidate(pageId),
+            archiveBuffer: file.buffer,
+            metadata,
+            headerSnapshot: pickRequestHeaders(req),
+            requestSnapshot: {
+                source: "multipart-form",
+                pageId,
+                pagePath,
+                title: rawTitle,
+            },
+        });
+        res.status(202).json({
+            jobId,
+            status: "queued",
+            createdAt,
+        });
+    });
+    const jsonJobHandler = asyncHandler(async (req, res) => {
+        const parseResult = jobRequestSchema.safeParse(req.body);
+        if (!parseResult.success) {
+            throw new HttpError(400, {
+                error: "validation_failed",
+                details: parseResult.error.flatten(),
+            });
+        }
+        const body = parseResult.data;
+        const base64Payload = body.sourceArchive.replace(/\s+/g, "");
+        if (!BASE64_PATTERN.test(base64Payload) || base64Payload.length === 0) {
+            throw new HttpError(400, { error: "invalid_base64" });
+        }
+        let archiveBuffer;
+        try {
+            archiveBuffer = Buffer.from(base64Payload, "base64");
+        }
+        catch {
+            throw new HttpError(400, { error: "invalid_base64" });
+        }
+        const reEncoded = archiveBuffer.toString("base64").replace(/=+$/, "");
+        const normalizedInput = base64Payload.replace(/=+$/, "");
+        if (reEncoded !== normalizedInput) {
+            throw new HttpError(400, { error: "invalid_base64" });
+        }
+        const { jobId, createdAt } = await submitJob({
+            jobIdInput: body.jobId,
+            archiveBuffer,
+            metadata: body.metadata,
+            cliOptions: body.cliOptions,
+            headerSnapshot: pickRequestHeaders(req),
+            requestSnapshot: {
+                source: "json-base64",
+            },
+        });
+        res.status(202).json({
+            jobId,
+            status: "queued",
+            createdAt,
+        });
+    });
     const upload = (0, multer_1.default)({
         storage: multer_1.default.memoryStorage(),
         limits: {
@@ -197,25 +372,68 @@ const createServer = async () => {
                 throw new Error(`Job ${jobId} disappeared`);
             }
             try {
+                await appendLogForJob({
+                    timestamp: new Date().toISOString(),
+                    level: "info",
+                    message: "Extracting archive to workspace",
+                    details: { workspaceDir },
+                });
                 await (0, archive_1.extractZipArchive)(archivePath, workspaceDir);
+                await appendLogForJob({
+                    timestamp: new Date().toISOString(),
+                    level: "info",
+                    message: "Archive extracted",
+                    details: { workspaceDir },
+                });
                 const safeOutputRelative = toSafeRelativePath(job.cliOptions.outputFile, `${jobId}.pdf`);
                 const outputAbsolute = node_path_1.default.resolve(outputDir, safeOutputRelative);
                 await (0, promises_1.mkdir)(node_path_1.default.dirname(outputAbsolute), { recursive: true });
+                await appendLogForJob({
+                    timestamp: new Date().toISOString(),
+                    level: "debug",
+                    message: "Ensured output directory exists",
+                    details: { outputRelative: safeOutputRelative },
+                });
                 await store.update(jobId, {
                     artifact: {
                         primaryFile: safeOutputRelative,
                         files: [],
                     },
                 });
+                await appendLogForJob({
+                    timestamp: new Date().toISOString(),
+                    level: "debug",
+                    message: "Job record updated with primary artifact placeholder",
+                    details: { outputRelative: safeOutputRelative },
+                });
                 const effectiveOptions = {
                     ...job.cliOptions,
                     outputFile: outputAbsolute,
                 };
+                await appendLogForJob({
+                    timestamp: new Date().toISOString(),
+                    level: "info",
+                    message: "Launching Vivliostyle CLI",
+                    details: {
+                        outputFile: safeOutputRelative,
+                        entries: effectiveOptions.entry,
+                    },
+                });
                 const result = await (0, vivliostyleRunner_1.runVivliostyle)({
                     jobId,
                     workspaceDir,
                     cliOptions: effectiveOptions,
                     appendLog: appendLogForJob,
+                });
+                await appendLogForJob({
+                    timestamp: new Date().toISOString(),
+                    level: result.timedOut ? "warn" : "info",
+                    message: "Vivliostyle CLI completed",
+                    details: {
+                        exitCode: result.exitCode,
+                        signal: result.signal ?? undefined,
+                        timedOut: result.timedOut,
+                    },
                 });
                 if (result.exitCode !== 0 || result.timedOut) {
                     await appendLogForJob({
@@ -236,12 +454,28 @@ const createServer = async () => {
                         exitCode: result.exitCode,
                         timedOut: result.timedOut,
                     });
+                    await scheduleAutoCleanup(jobId, "failed");
                     return;
                 }
-                await store.recordArtifactManifest(jobId);
+                const manifest = await store.recordArtifactManifest(jobId);
+                await appendLogForJob({
+                    timestamp: new Date().toISOString(),
+                    level: "info",
+                    message: "Artifact manifest recorded",
+                    details: {
+                        files: manifest.files.length,
+                        primaryFile: manifest.primaryFile,
+                    },
+                });
                 await store.markStatus(jobId, "succeeded");
+                await appendLogForJob({
+                    timestamp: new Date().toISOString(),
+                    level: "info",
+                    message: "Job marked as succeeded",
+                });
                 broadcastStatus(jobId, "succeeded");
                 closeLogStreamClients(jobId, { status: "succeeded" });
+                await scheduleAutoCleanup(jobId, "succeeded");
             }
             catch (error) {
                 await appendLogForJob({
@@ -262,10 +496,21 @@ const createServer = async () => {
                     reason: "job_failure",
                     message: error.message,
                 });
+                await scheduleAutoCleanup(jobId, "failed");
             }
             finally {
                 try {
+                    await appendLogForJob({
+                        timestamp: new Date().toISOString(),
+                        level: "debug",
+                        message: "Cleaning up temporary input artifacts",
+                    });
                     await store.cleanupInput(jobId);
+                    await appendLogForJob({
+                        timestamp: new Date().toISOString(),
+                        level: "debug",
+                        message: "Temporary input artifacts removed",
+                    });
                 }
                 catch (cleanupError) {
                     logger_1.logger.warn(`Cleanup failed for job ${jobId}`, {
@@ -327,9 +572,15 @@ const createServer = async () => {
             archiveBuffer,
             requestSnapshot,
         });
+        await logJob(jobId, "Job registered", "info", {
+            archiveBytes: archiveBuffer.length,
+            requestSource: requestSnapshot.source ?? metadata?.source ?? "unknown",
+        });
         await store.markStatus(jobId, "queued");
         broadcastStatus(jobId, "queued");
+        await logJob(jobId, "Job status updated to queued", "debug");
         scheduleJob(jobId);
+        await logJob(jobId, "Job submitted to execution queue", "debug");
         return { jobId, createdAt };
     };
     const normalizeJobIdCandidate = (value) => {
@@ -351,80 +602,21 @@ const createServer = async () => {
             uptime: process.uptime(),
         });
     });
-    app.post("/api/v1/jobs", asyncHandler(async (req, res) => {
-        const parseResult = jobRequestSchema.safeParse(req.body);
-        if (!parseResult.success) {
-            throw new HttpError(400, {
-                error: "validation_failed",
-                details: parseResult.error.flatten(),
-            });
+    app.post("/vivliostyle/jobs", (req, res, next) => {
+        const contentType = req.headers["content-type"] ?? "";
+        if (!contentType.includes("multipart/form-data")) {
+            return next();
         }
-        const body = parseResult.data;
-        const base64Payload = body.sourceArchive.replace(/\s+/g, "");
-        if (!BASE64_PATTERN.test(base64Payload) || base64Payload.length === 0) {
-            throw new HttpError(400, { error: "invalid_base64" });
-        }
-        let archiveBuffer;
-        try {
-            archiveBuffer = Buffer.from(base64Payload, "base64");
-        }
-        catch {
-            throw new HttpError(400, { error: "invalid_base64" });
-        }
-        const reEncoded = archiveBuffer.toString("base64").replace(/=+$/, "");
-        const normalizedInput = base64Payload.replace(/=+$/, "");
-        if (reEncoded !== normalizedInput) {
-            throw new HttpError(400, { error: "invalid_base64" });
-        }
-        const { jobId, createdAt } = await submitJob({
-            jobIdInput: body.jobId,
-            archiveBuffer,
-            metadata: body.metadata,
-            cliOptions: body.cliOptions,
-            headerSnapshot: pickRequestHeaders(req),
-            requestSnapshot: {
-                source: "json-base64",
-            },
+        upload.single("zip")(req, res, (err) => {
+            if (err) {
+                next(err);
+                return;
+            }
+            multipartJobHandler(req, res, next);
         });
-        res.status(202).json({
-            jobId,
-            status: "queued",
-            createdAt,
-        });
-    }));
-    app.post("/vivliostyle/jobs", upload.single("zip"), asyncHandler(async (req, res) => {
-        const file = req.file;
-        if (!file?.buffer?.length) {
-            throw new HttpError(400, { error: "zip_missing" });
-        }
-        const pageId = typeof req.body?.pageId === "string" ? req.body.pageId : undefined;
-        const pagePath = typeof req.body?.pagePath === "string" ? req.body.pagePath : undefined;
-        const rawTitle = typeof req.body?.title === "string" ? req.body.title.trim() : undefined;
-        const metadata = {
-            title: rawTitle || undefined,
-            pageId,
-            pagePath,
-            source: "multipart-form",
-        };
-        const { jobId, createdAt } = await submitJob({
-            jobIdInput: normalizeJobIdCandidate(pageId),
-            archiveBuffer: file.buffer,
-            metadata,
-            headerSnapshot: pickRequestHeaders(req),
-            requestSnapshot: {
-                source: "multipart-form",
-                pageId,
-                pagePath,
-                title: rawTitle,
-            },
-        });
-        res.status(202).json({
-            jobId,
-            status: "queued",
-            createdAt,
-        });
-    }));
-    app.get("/api/v1/jobs/:jobId", asyncHandler(async (req, res) => {
+    });
+    app.post("/vivliostyle/jobs", jsonJobHandler);
+    app.get("/vivliostyle/jobs/:jobId", asyncHandler(async (req, res) => {
         const job = store.get(req.params.jobId);
         if (!job) {
             res.status(404).json({ error: "job_not_found" });
@@ -440,7 +632,7 @@ const createServer = async () => {
             },
         });
     }));
-    app.get("/api/v1/jobs/:jobId/result", asyncHandler(async (req, res) => {
+    app.get("/vivliostyle/jobs/:jobId/result", asyncHandler(async (req, res) => {
         const job = store.get(req.params.jobId);
         if (!job) {
             res.status(404).json({ error: "job_not_found" });
@@ -463,6 +655,9 @@ const createServer = async () => {
             res.status(404).json({ error: "artifact_missing", file: targetFile });
             return;
         }
+        await logJob(job.jobId, "Result download requested", "info", {
+            file: targetFile,
+        });
         const stream = store.createArtifactReadStream(job.jobId, targetFile);
         stream.on("error", (error) => {
             logger_1.logger.error(`Failed to stream artifact ${targetFile}`, { error });
@@ -477,7 +672,7 @@ const createServer = async () => {
         res.setHeader("Content-Disposition", `attachment; filename="${node_path_1.default.basename(targetFile)}"`);
         stream.pipe(res);
     }));
-    app.get("/api/v1/jobs/:jobId/log", asyncHandler(async (req, res) => {
+    app.get("/vivliostyle/jobs/:jobId/log", asyncHandler(async (req, res) => {
         const job = store.get(req.params.jobId);
         if (!job) {
             res.status(404).json({ error: "job_not_found" });
@@ -495,7 +690,7 @@ const createServer = async () => {
         res.setHeader("Content-Type", "application/x-ndjson; charset=utf-8");
         stream.pipe(res);
     }));
-    app.get("/api/v1/jobs/:jobId/log/stream", asyncHandler(async (req, res) => {
+    app.get("/vivliostyle/jobs/:jobId/log/stream", asyncHandler(async (req, res) => {
         const jobId = req.params.jobId;
         const job = store.get(jobId);
         if (!job) {
@@ -515,7 +710,7 @@ const createServer = async () => {
         const existingLog = await store.readLog(jobId);
         if (existingLog) {
             for (const line of existingLog.split(/\r?\n/).filter(Boolean)) {
-                res.write(`data: ${line}\n\n`);
+                res.write(`event: jobs\ndata: ${line}\n\n`);
             }
         }
         res.write(`event: status\ndata: ${JSON.stringify({ status: job.status })}\n\n`);
@@ -526,7 +721,7 @@ const createServer = async () => {
         }
         registerLogStreamClient(jobId, res);
     }));
-    app.delete("/api/v1/jobs/:jobId", asyncHandler(async (req, res) => {
+    app.delete("/vivliostyle/jobs/:jobId", asyncHandler(async (req, res) => {
         const job = store.get(req.params.jobId);
         if (!job) {
             res.status(404).json({ error: "job_not_found" });
@@ -536,6 +731,8 @@ const createServer = async () => {
             res.status(409).json({ error: "job_in_progress", status: job.status });
             return;
         }
+        await logJob(job.jobId, "Manual delete requested", "info");
+        await cancelAutoCleanup(job.jobId, "manual_delete");
         await store.deleteJob(job.jobId);
         closeLogStreamClients(job.jobId, { status: job.status, reason: "job_deleted" });
         logger_1.logger.info(`Job ${job.jobId} deleted on request`);
