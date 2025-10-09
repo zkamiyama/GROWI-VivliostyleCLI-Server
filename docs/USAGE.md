@@ -6,25 +6,25 @@
 1. **Node.js をインストール**（推奨: v18.18 以上の LTS）
    - 公式サイト <https://nodejs.org/ja/> からインストーラを取得し、画面の指示に従ってインストールします。
 2. **インストール確認**
-   `ash
+   `bash
    node -v
    npm -v
    `
    バージョン番号が表示されれば準備完了です。
 3. **ソースコード取得**
    - Git を利用する場合
-     `ash
+     `bash
      git clone https://example.com/your/repo.git
      `
    - Git を使わない場合は ZIP をダウンロードして任意の場所に展開します。
 
 ## 2. セットアップ
 1. プロジェクトディレクトリへ移動:
-   `ash
+   `bash
    cd GROWI-VivliostyleCLI-Server
    `
 2. 依存パッケージをインストール（初回／更新のたびに実行）:
-   `ash
+   `bash
    npm install
    `
    package.json では @vivliostyle/cli を latest 指定しているため、
@@ -46,29 +46,29 @@ pm run proxy:start : ビルド済み dist/proxyServer.js を起動
 
 ## 4. 依存パッケージの更新
 1. どのパッケージが古いか確認
-   `ash
+   `bash
    npm outdated
    `
 2. 互換性のある範囲でまとめて更新
-   `ash
+   `bash
    npm update
    `
 3. 特定パッケージだけ最新版にする
-   `ash
+   `bash
    npm install <package>@latest
    `
 4. 更新後は必ずテスト
-   `ash
+   `bash
    npm test
    `
 
 ## 5. アンインストール／クリーンアップ
 - 依存パッケージをまとめて削除
-  `ash
+  `bash
   rm -rf node_modules package-lock.json
   `
 - ビルド成果物とジョブデータを削除
-  `ash
+  `bash
   npm run clean
   rimraf jobs
   `
@@ -93,7 +93,7 @@ pm run dev の前に読み込む、もしくはコマンドの前に VIV_QUEUE_C
 
 ## 7. API 利用例
 ### JSON API（base64 で ZIP を送信）
-`ash
+`bash
 curl -X POST http://localhost:4781/vivliostyle/jobs \
   -H "Content-Type: application/json" \
   -d '{
@@ -104,7 +104,7 @@ curl -X POST http://localhost:4781/vivliostyle/jobs \
 Base64 は元 ZIP より約 1.33 倍になるため、500 MB の制限内に収まるよう圧縮や画像最適化を行ってください。
 
 ### 同一オリジン向け multipart API
-`ash
+`bash
 curl -X POST http://localhost:4781/vivliostyle/jobs \
   -F pageId=page:123 \
   -F pagePath=/book/sample \
@@ -114,29 +114,29 @@ curl -X POST http://localhost:4781/vivliostyle/jobs \
 pageId は jobId に正規化されます（英数字・._- 以外は - に置換）。空になる場合は UUID が割り当てられます。
 
 ### SSE でログ／ステータスを受信
-`ash
+`bash
 curl -N http://localhost:4781/vivliostyle/jobs/<jobId>/log/stream
 `
 - data: 行にログ（JSON）が流れます。
-- vent: status で queued / 
-unning / succeeded / ailed を受信。
-- ジョブ完了時に vent: complete が届き接続がクローズされます。
+- event: status で queued / 
+unning / succeeded / failed を受信。
+- ジョブ完了時に event: complete が届き接続がクローズされます。
 
 ### 成果物のダウンロード
-`ash
+`bash
 curl -L http://localhost:4781/vivliostyle/jobs/<jobId>/result -o output.pdf
 `
 任意ファイルを取得したい場合は ?file=relative/path を付与します。
 
 ### 処理後のクリーンアップ
-`ash
+`bash
 curl -X DELETE http://localhost:4781/vivliostyle/jobs/<jobId>
 `
 ATTACHMENT へ成果物を移した後に必ず実行し、サーバー上の一時ファイルを削除してください（タイムアウト後には自動削除されるものの、明示的なクリーンアップ推奨）。
 
 ## 8. 逆プロキシの利用
 src/proxyServer.ts は http-proxy を使った簡易リバースプロキシです。
-`ash
+`bash
 npm run proxy        # tsx を使った開発起動
 npm run proxy:start  # dist/proxyServer.js を実行
 `
