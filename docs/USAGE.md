@@ -232,3 +232,85 @@ npx pm2 startup
 
 `pm2.config.cjs` を直接編集して環境変数を変更できます。変更後は `npm run pm2:setup -- --skip-build` で再適用するか、`npx pm2 reload pm2.config.cjs` を使って反映してください。
 
+## ブラウザだけでの最小確認（Console）
+
+実装に合わせた最小確認手順を示します。可能であればプロキシ（例: `http://localhost:4871/`）で GROWI の画面を開き、その同一オリジンの Console から以下を実行してください。プロキシを使うと CORS を気にせず確認できます。API サーバー直叩き（`http://localhost:4781`）でも動作しますが、ブラウザ側で CORS に注意してください。
+
+1) サーバが生きているか（簡易チェック）
+
+- ブラウザのアドレスバーで次を開く:
+  - `http://localhost:4781/healthz` → JSON が返れば API サーバーが起動しています。
+  - プロキシを使う場合は `http://localhost:4871/` を開いて GROWI の画面が表示されるか確認します。
+
+2) ジョブ登録（最小：Console で multipart を送る）
+
+- ブラウザの開発者ツール Console に貼って実行します。サーバは multipart のファイルフィールド名 `zip` を受け取ります。
+
+```javascript
+(async () => {
+  const form = new FormData();
+  form.append('pageId', 'page:browser-test');
+  form.append('pagePath', '/browser/test');
+  form.append('title', 'ブラウザテスト');
+
+  // 最小の ZIP ヘッダを含む Blob（ジョブ登録確認用）。本番では実際の ZIP をアップロードしてください。
+  const zipHeader = 'PK\x03\x04';
+  const blob = new Blob([zipHeader], { type: 'application/zip' });
+  form.append('zip', blob, 'bundle.zip');
+
+  const res = await fetch('/vivliostyle/jobs', { method: 'POST', body: form });
+  const txt = await res.text();
+  try {
+    console.log('response', JSON.parse(txt));
+  } catch (e) {
+    console.log('response text', txt);
+  }
+})();
+```
+
+- 返却は通常 `202` で `{ jobId, status: 'queued', createdAt }` 形式です。`jobId` を控えてください。
+
+3) ジョブの状態確認（ポーリング）
+
+```javascript
+// jobId を上の結果で置き換えて実行
+(async () => {
+  const jobId = 'PUT_JOB_ID_HERE';
+  const r = await fetch(`/vivliostyle/jobs/${jobId}`);
+  console.log(await r.json());
+})();
+```
+
+4) SSE（ログ／ステータス）を受信する（リアルタイム）
+
+- サーバ実装では SSE エンドポイントが `/vivliostyle/jobs/:jobId/log/stream` にあります。以下は Console スニペットです。
+
+```javascript
+// jobId を上の結果で置き換え
+const jobId = 'PUT_JOB_ID_HERE';
+const es = new EventSource(`/vivliostyle/jobs/${jobId}/log/stream`);
+es.addEventListener('jobs', (ev) => {
+  try { console.log('log', JSON.parse(ev.data)); } catch { console.log('log raw', ev.data); }
+});
+es.addEventListener('status', (ev) => console.log('status', JSON.parse(ev.data)));
+es.addEventListener('complete', (ev) => { console.log('complete', JSON.parse(ev.data)); es.close(); });
+es.onerror = (err) => console.warn('SSE error', err);
+```
+
+- SSE で過去ログ（NDJSON の各行が `event: jobs` として送られる）、`status`（queued/running/succeeded/failed）、ジョブ完了時の `complete` を受け取れます。
+
+5) 成果物確認（成功時）
+
+- 成功すると `/vivliostyle/jobs/:jobId/result` からダウンロードできます（ブラウザで次を開く）：
+
+```
+/vivliostyle/jobs/<jobId>/result
+```
+
+- またはクライアント側で `window.open(`/vivliostyle/jobs/${jobId}/result`)` を実行してダウンロードを開始できます。
+
+注意点
+- 事前にサーバと（必要なら）プロキシが起動していることを確認してください。
+- 実際に PDF を作るためには有効な ZIP（doc.html と関連アセット）が必要です。ここでは「登録→SSEでログを見る」までが最小確認です。
+- もし SSE が届かない場合は中間プロキシのバッファリングやロードバランサのタイムアウト（ALB/Cloudflare など）を疑ってください。
+
