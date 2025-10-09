@@ -11,7 +11,8 @@
     "proxy": "tsx src/proxyServer.ts",
     "proxy:start": "node dist/proxyServer.js",
     "test": "vitest run",
-    "test:watch": "vitest"
+    "test:watch": "vitest",
+    "pm2:setup": "node ./scripts/pm2/setup.mjs"
   },
   "dependencies": {
     "@vivliostyle/cli": "latest",
