@@ -22,33 +22,7 @@ for app in $KNOWN_APPS; do
   npx pm2 delete "$app" || true
 done
 
-echo "Attempting to discover PM2 processes by listing pm2 jlist (best-effort)..."
-if npx pm2 jlist --silent >/dev/null 2>&1; then
-  npx pm2 jlist --silent | node -e '
-const fs=require("fs");
-try{
-  const data=fs.readFileSync(0,"utf8");
-  const list=JSON.parse(data||"[]");
-  const repo=process.argv[1];
-  const repoPath=process.argv[1] || "";
-  const procs = list.filter(p=>{
-    const env = p.pm2_env || {};
-    const cwd = env.pm_cwd || "";
-    const exec = env.pm_exec_path || "";
-    try{ if(cwd && cwd.indexOf(repoPath)!==-1) return true; }catch(e){}
-    try{ if(exec && exec.indexOf(repoPath)!==-1) return true; }catch(e){}
-    return false;
-  }).map(p=>p.name||p.pm_id||"").filter(Boolean);
-  if(procs.length>0){
-    console.log("Found via jlist:", procs.join(' '));
-    procs.forEach(function(name){
-      try{ require('child_process').execSync('npx pm2 stop '+name); }catch(e){}
-      try{ require('child_process').execSync('npx pm2 delete '+name); }catch(e){}
-    });
-  } else { console.log('No additional pm2 processes detected via jlist'); }
-}catch(e){ console.error('pm2 jlist parse failed', e && e.message); }
-' "$REPO_ROOT" || true
-fi
+echo "Skipping dynamic pm2 discovery (pm2 jlist) to avoid daemon socket/EPIPE issues; only stopping known apps: $KNOWN_APPS"
 
 echo "Fetching remote and hard-reset to origin/master..."
 git fetch origin --prune
@@ -87,23 +61,7 @@ echo "Running 'npx pm2 startup' to generate startup command..."
 STARTUP_OUTPUT=$(npx pm2 startup 2>&1 || true)
 echo "$STARTUP_OUTPUT"
 
-# Try to extract and run the suggested command (careful: may require sudo)
-# Look for lines starting with sudo or containing systemctl enable
-SUGGESTED_CMD=$(printf "%s" "$STARTUP_OUTPUT" | sed -n -E 's|^\s*(sudo .*|systemctl .*|/bin/.*pm2.*|pm2-startup-.*)$|\1|p' | head -n 1 || true)
-if [ -n "$SUGGESTED_CMD" ]; then
-  echo "Detected startup command: $SUGGESTED_CMD"
-  if command -v sudo >/dev/null 2>&1; then
-    echo "Attempting to run startup command with sudo (you may be prompted for your password)"
-    eval "$SUGGESTED_CMD" || echo "Running the startup command failed; please run it manually."
-    echo "Running 'npx pm2 save' after startup setup"
-    npx pm2 save || true
-  else
-    echo "sudo not available; please run the following as root:" 
-    echo "$SUGGESTED_CMD"
-  fi
-else
-  echo "No explicit startup command detected in output. If your platform needs manual steps, run: npx pm2 startup" 
-fi
+echo "NOTE: pm2 startup output printed above. If your system requires manual action, run the command shown by 'npx pm2 startup' as root (for example: 'systemctl enable pm2-root'), then run 'npx pm2 save'."
 
 echo "Deploy completed."
 
