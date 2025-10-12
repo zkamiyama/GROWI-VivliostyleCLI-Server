@@ -1,0 +1,110 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# update: complete overwrite deploy for this repository
+# - detects PM2 processes running from this repo and stops/deletes them
+# - fetches origin/master, hard-resets and cleans
+# - installs production deps, builds, starts via pm2.config.cjs
+# - runs npx pm2 startup and attempts to apply the printed command if possible
+
+REPO_ROOT="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
+cd "$REPO_ROOT"
+
+echo "Snapshotting disabled by request; proceeding without saving snapshots."
+
+# find pm2 processes that are running from this repo
+echo "Detecting PM2 processes that belong to this repo..."
+PM2_PROCS=$(npx pm2 jlist --silent 2>/dev/null | node -e '
+const fs=require("fs");
+try{
+  const data=fs.readFileSync(0,"utf8");
+  const list=JSON.parse(data||"[]");
+  const repo=process.argv[1];
+  const names = list.filter(p=>{
+    const env = p.pm2_env || {};
+    const cwd = env.pm_cwd || env.pm_cwd || "";
+    const exec = env.pm_exec_path || env.pm_exec_path || "";
+    if(!repo) return false;
+    try{ if(cwd && cwd===repo) return true; }catch(e){}
+    try{ if(exec && exec.indexOf(repo)!==-1) return true; }catch(e){}
+    return false;
+  }).map(p=>p.name||p.pm_id||"");
+  console.log(names.filter(Boolean).join(" "));
+}catch(e){ console.error("pm2 jlist parse failed", e && e.message); }
+' "$REPO_ROOT" | tr -s ' ' || true
+
+if [ -n "$PM2_PROCS" ]; then
+  echo "Found PM2 processes to stop/delete: $PM2_PROCS"
+  for app in $PM2_PROCS; do
+    echo "Stopping $app..."
+    npx pm2 stop "$app" || true
+  done
+  for app in $PM2_PROCS; do
+    echo "Deleting $app..."
+    npx pm2 delete "$app" || true
+  done
+else
+  echo "No repo-owned PM2 processes detected. Continuing."
+fi
+
+echo "Fetching remote and hard-reset to origin/master..."
+git fetch origin --prune
+git reset --hard origin/master
+git clean -fdx
+
+echo "Installing production dependencies (npm ci --omit=dev)"
+npm ci --omit=dev
+
+if [ -f "$REPO_ROOT/package.json" ]; then
+  if grep -q '"build"\s*:' package.json >/dev/null 2>&1; then
+    echo "Running npm run build"
+    npm run build
+  else
+    echo "No build script found in package.json; skipping build"
+  fi
+fi
+
+# Start via pm2.config.cjs if present
+if [ -f "$REPO_ROOT/pm2.config.cjs" ]; then
+  echo "Starting processes from pm2.config.cjs"
+  npx pm2 start pm2.config.cjs --update-env --env production || true
+  npx pm2 save || true
+else
+  echo "pm2.config.cjs not found; nothing started. If you want to start manually, run: npx pm2 start <script>"
+fi
+
+echo "Running 'npx pm2 startup' to generate startup command..."
+STARTUP_OUTPUT=$(npx pm2 startup 2>&1 || true)
+echo "$STARTUP_OUTPUT"
+
+# Try to extract and run the suggested command (careful: may require sudo)
+# Look for lines starting with sudo or containing systemctl enable
+SUGGESTED_CMD=$(printf "%s" "$STARTUP_OUTPUT" | sed -n -E 's/^\s*(sudo .*|systemctl .*|/bin/.*pm2.*|pm2-startup-.*)$/\1/p' | head -n 1 || true)
+if [ -n "$SUGGESTED_CMD" ]; then
+  echo "Detected startup command: $SUGGESTED_CMD"
+  if command -v sudo >/dev/null 2>&1; then
+    echo "Attempting to run startup command with sudo (you may be prompted for your password)"
+    eval "$SUGGESTED_CMD" || echo "Running the startup command failed; please run it manually."
+    echo "Running 'npx pm2 save' after startup setup"
+    npx pm2 save || true
+  else
+    echo "sudo not available; please run the following as root:" 
+    echo "$SUGGESTED_CMD"
+  fi
+else
+  echo "No explicit startup command detected in output. If your platform needs manual steps, run: npx pm2 startup" 
+fi
+
+echo "Deploy completed."
+
+echo "Quick smoke checks (if curl available):"
+if command -v curl >/dev/null 2>&1; then
+  echo -n "Proxy root (http://127.0.0.1:4871/) -> "
+  curl -fsS -o /dev/null -w "%{http_code}\n" http://127.0.0.1:4871/ || echo "FAILED"
+  echo -n "API health (http://127.0.0.1:4781/healthz) -> "
+  curl -fsS -o /dev/null -w "%{http_code}\n" http://127.0.0.1:4781/healthz || echo "FAILED"
+else
+  echo "curl not found; please perform manual smoke checks."
+fi
+
+exit 0

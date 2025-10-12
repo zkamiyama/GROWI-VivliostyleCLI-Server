@@ -43,17 +43,25 @@ const node_url_1 = require("node:url");
 const http_proxy_1 = __importDefault(require("http-proxy"));
 const logger_1 = require("./logger");
 const createReverseProxyServer = (config) => {
-    const targetUrl = new node_url_1.URL(config.target);
-    const proxy = http_proxy_1.default.createProxyServer({
-        target: targetUrl.href,
+    const vivliostyleUrl = new node_url_1.URL(config.vivliostyleTarget);
+    const growiUrl = new node_url_1.URL(config.growiTarget);
+    // 2 つのプロキシを作成
+    const vivliostyleProxy = http_proxy_1.default.createProxyServer({
+        target: vivliostyleUrl.href,
         changeOrigin: true,
         ws: true,
         ignorePath: false,
     });
-    proxy.on("error", (error, req, res) => {
+    const growiProxy = http_proxy_1.default.createProxyServer({
+        target: growiUrl.href,
+        changeOrigin: true,
+        ws: true,
+        ignorePath: false,
+    });
+    const handleProxyError = (error, req, res, targetHref) => {
         logger_1.logger.error("Reverse proxy encountered an error", {
             error: error.message,
-            target: targetUrl.href,
+            target: targetHref,
             url: req?.url,
         });
         if (!res) {
@@ -68,29 +76,52 @@ const createReverseProxyServer = (config) => {
         else if (res instanceof node_net_1.Socket) {
             res.destroy(error);
         }
+    };
+    vivliostyleProxy.on("error", (error, req, res) => {
+        handleProxyError(error, req, res, vivliostyleUrl.href);
+    });
+    growiProxy.on("error", (error, req, res) => {
+        handleProxyError(error, req, res, growiUrl.href);
     });
     const server = node_http_1.default.createServer((req, res) => {
-        proxy.web(req, res);
+        const url = req.url || "/";
+        // /vivliostyle で始まる場合は CLI サーバへ、それ以外は GROWI へ
+        if (url.startsWith("/vivliostyle")) {
+            vivliostyleProxy.web(req, res);
+        }
+        else {
+            growiProxy.web(req, res);
+        }
     });
     server.on("upgrade", (req, socket, head) => {
-        proxy.ws(req, socket, head);
+        const url = req.url || "/";
+        // WebSocket も同様に振り分け
+        if (url.startsWith("/vivliostyle")) {
+            vivliostyleProxy.ws(req, socket, head);
+        }
+        else {
+            growiProxy.ws(req, socket, head);
+        }
     });
     return server;
 };
 exports.createReverseProxyServer = createReverseProxyServer;
 if (require.main === module) {
-    const target = process.env.VIV_PROXY_TARGET ?? "http://127.0.0.1:4781";
+    const vivliostyleTarget = process.env.VIV_PROXY_TARGET ?? "http://127.0.0.1:4781";
+    const growiTarget = process.env.GROWI_TARGET ?? "http://127.0.0.1:3000";
     const port = Number.parseInt(process.env.VIV_PROXY_PORT ?? "4871", 10);
     const hostname = process.env.VIV_PROXY_HOST ?? "0.0.0.0";
     const server = (0, exports.createReverseProxyServer)({
-        target,
+        vivliostyleTarget,
+        growiTarget,
         port,
         hostname,
     });
     server.listen(port, hostname, () => {
         const address = server.address();
         logger_1.logger.info("Reverse proxy listening", {
-            target,
+            vivliostyleTarget,
+            growiTarget,
             port: address.port,
             hostname: address.address,
         });
