@@ -142,6 +142,17 @@ npm run proxy:start  # dist/proxyServer.js を実行
 `
 環境変数 VIV_PROXY_TARGET で転送先 API、VIV_PROXY_PORT で待受ポートを指定します。TLS 終端を前段に置きたい場合は、このプロキシを HTTPS の背後に配置してください。
 
+### プロキシ挙動の詳細（重要）
+
+このリポジトリに同梱の簡易プロキシはルーティングルールを持ち、以下のように振り分けます。
+
+- `/vivliostyle/*` → Vivliostyle CLI サーバ（デフォルト `VIV_PROXY_TARGET=http://127.0.0.1:4781`）へ転送
+- それ以外（`/` を含む）→ GROWI（デフォルト `GROWI_TARGET=http://127.0.0.1:3000`）へ転送
+
+このため、Funnel 等を使って公開した場合でも `https://<funnel-domain>/` にアクセスすると GROWI のトップページが表示され、`https://<funnel-domain>/vivliostyle/jobs` に対しては Vivliostyle API が応答します。
+
+プロキシの挙動を変更したい場合は `src/proxyServer.ts` を編集するか、環境変数 `VIV_PROXY_TARGET` / `GROWI_TARGET` を設定してください。
+
 ## 9. トラブルシューティング
 - 
 pm install に失敗する: 
