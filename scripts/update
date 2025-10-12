@@ -33,6 +33,23 @@ echo "Installing dependencies for build (npm ci)"
 # install all deps so build tools (devDependencies like rimraf) are present
 npm ci
 
+# Install Playwright system deps (if apt-get available) and Chromium runtime to avoid runtime failures.
+# This is optional and best-effort: failures won't abort the update.
+if command -v npx >/dev/null 2>&1; then
+  if command -v apt-get >/dev/null 2>&1; then
+    echo "Detected apt-get: attempting 'npx playwright install-deps' (may require sudo)"
+    # try to install system deps; don't fail deploy if it doesn't work
+    npx playwright install-deps || true
+  else
+    echo "apt-get not found; skipping 'playwright install-deps'"
+  fi
+
+  echo "Attempting 'npx playwright install chromium' to pre-download Chromium runtime (best-effort)"
+  npx playwright install chromium || true
+else
+  echo "npx not found; skipping Playwright installation steps"
+fi
+
 # After successful build we'll prune dev deps to keep production footprint small
 
 if [ -f "$REPO_ROOT/package.json" ]; then
