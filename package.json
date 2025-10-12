@@ -13,6 +13,7 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "pm2:setup": "node ./scripts/pm2/setup.mjs"
+    ,"update": "bash ./scripts/update"
   },
   "dependencies": {
     "@vivliostyle/cli": "latest",
