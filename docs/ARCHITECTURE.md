@@ -62,6 +62,13 @@ jobs/
 ## 逆プロキシ
 src/proxyServer.ts は http-proxy を利用した薄いリバースプロキシ。VIV_PROXY_TARGET を API サーバーに設定し、node dist/proxyServer.js または tsx src/proxyServer.ts で起動する。TLS 終端や同一オリジン要件がある場合はこのプロキシの表側に HTTPS を配置する。
 
+### 注意: ルーティングの仕様
+本プロキシは特定パスを振り分ける仕様になっています。
+- `/vivliostyle/*` は Vivliostyle CLI サーバへ転送されます（デフォルト `http://127.0.0.1:4781`）。
+- それ以外のリクエスト（`/` を含む）は GROWI 本体へ転送されます（デフォルト `http://127.0.0.1:3000`）。
+
+このルールにより、同一オリジンで GROWI と Vivliostyle API を共存させ、Funnel 等で同一オリジン公開をした際に期待どおり動作するようになっています。
+
 ## フロントエンド連携メモ
 - プラグインは multipart または JSON を選択可能。大容量は multipart が推奨。
 - ジョブ登録直後に GET /vivliostyle/jobs/:jobId をポーリング、もしくは GET /vivliostyle/jobs/:jobId/log/stream を接続して SSE で進捗を受信。
