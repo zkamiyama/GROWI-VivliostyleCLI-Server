@@ -28,6 +28,9 @@ const buildArguments = (opts) => {
     if (opts.additionalArgs?.length) {
         args.push(...opts.additionalArgs);
     }
+    if (typeof opts.css === "string" && opts.css.length > 0) {
+        args.push("--css", opts.css);
+    }
     const entries = Array.isArray(opts.entry) ? opts.entry : (opts.entry ? [opts.entry] : []);
     args.push(...entries);
     return args;

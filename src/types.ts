@@ -9,6 +9,7 @@ export interface CliOptionsInput {
   format?: string;
   timeoutSeconds?: number;
   additionalArgs?: string[];
+  css?: string;
 }
 
 export interface JobMetadata extends Record<string, unknown> {

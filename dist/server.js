@@ -56,6 +56,7 @@ const sanitizeJobId = (value) => {
     return value;
 };
 const BASE64_PATTERN = /^[A-Za-z0-9+/=]+$/;
+const CSS_MAX_BYTES = 256 * 1024;
 class HttpError extends Error {
     status;
     payload;
@@ -65,17 +66,27 @@ class HttpError extends Error {
         this.payload = payload;
     }
 }
+const cssOptionSchema = zod_1.z.string()
+    .transform((value) => value.trim())
+    .refine((value) => value.length > 0, {
+    message: "cliOptions.css must not be empty",
+})
+    .refine((value) => Buffer.byteLength(value, "utf8") <= CSS_MAX_BYTES, {
+    message: `cliOptions.css exceeds maximum length of ${CSS_MAX_BYTES} bytes`,
+});
+const cliOptionsSchema = zod_1.z.object({
+    configPath: zod_1.z.string().min(1).optional(),
+    entry: zod_1.z.union([zod_1.z.string().min(1), zod_1.z.array(zod_1.z.string().min(1))]).optional(),
+    outputFile: zod_1.z.string().min(1).optional(),
+    format: zod_1.z.string().min(1).optional(),
+    timeoutSeconds: zod_1.z.number().int().positive().max(3600 * 24).optional(),
+    additionalArgs: zod_1.z.array(zod_1.z.string().min(1)).optional(),
+    css: cssOptionSchema.optional(),
+});
 const jobRequestSchema = zod_1.z.object({
     jobId: zod_1.z.string().min(3).max(64).optional(),
     sourceArchive: zod_1.z.string().min(1, "sourceArchive is required"),
-    cliOptions: zod_1.z.object({
-        configPath: zod_1.z.string().min(1).optional(),
-        entry: zod_1.z.union([zod_1.z.string().min(1), zod_1.z.array(zod_1.z.string().min(1))]).optional(),
-        outputFile: zod_1.z.string().min(1).optional(),
-        format: zod_1.z.string().min(1).optional(),
-        timeoutSeconds: zod_1.z.number().int().positive().max(3600 * 24).optional(),
-        additionalArgs: zod_1.z.array(zod_1.z.string().min(1)).optional(),
-    }).default({}),
+    cliOptions: cliOptionsSchema.default({}),
     metadata: zod_1.z.record(zod_1.z.any()).optional(),
 });
 const asyncHandler = (handler) => {
@@ -282,6 +293,25 @@ const createServer = async () => {
         const pageId = typeof req.body?.pageId === "string" ? req.body.pageId : undefined;
         const pagePath = typeof req.body?.pagePath === "string" ? req.body.pagePath : undefined;
         const rawTitle = typeof req.body?.title === "string" ? req.body.title.trim() : undefined;
+        const rawCliOptions = typeof req.body?.cliOptions === "string" ? req.body.cliOptions : undefined;
+        let cliOptions;
+        if (rawCliOptions) {
+            let parsedCliOptions;
+            try {
+                parsedCliOptions = JSON.parse(rawCliOptions);
+            }
+            catch {
+                throw new HttpError(400, { error: "invalid_cli_options_json" });
+            }
+            const cliParseResult = cliOptionsSchema.safeParse(parsedCliOptions);
+            if (!cliParseResult.success) {
+                throw new HttpError(400, {
+                    error: "invalid_cli_options",
+                    details: cliParseResult.error.flatten(),
+                });
+            }
+            cliOptions = cliParseResult.data;
+        }
         const metadata = {
             title: rawTitle || undefined,
             pageId,
@@ -291,6 +321,7 @@ const createServer = async () => {
         const { jobId, createdAt } = await submitJob({
             jobIdInput: normalizeJobIdCandidate(pageId),
             archiveBuffer: file.buffer,
+            cliOptions,
             metadata,
             headerSnapshot: pickRequestHeaders(req),
             requestSnapshot: {
@@ -410,14 +441,18 @@ const createServer = async () => {
                     ...job.cliOptions,
                     outputFile: outputAbsolute,
                 };
+                const launchDetails = {
+                    outputFile: safeOutputRelative,
+                    entries: effectiveOptions.entry,
+                };
+                if (typeof job.cliOptions.css === "string") {
+                    launchDetails.cssBytes = Buffer.byteLength(job.cliOptions.css, "utf8");
+                }
                 await appendLogForJob({
                     timestamp: new Date().toISOString(),
                     level: "info",
                     message: "Launching Vivliostyle CLI",
-                    details: {
-                        outputFile: safeOutputRelative,
-                        entries: effectiveOptions.entry,
-                    },
+                    details: launchDetails,
                 });
                 const result = await (0, vivliostyleRunner_1.runVivliostyle)({
                     jobId,
