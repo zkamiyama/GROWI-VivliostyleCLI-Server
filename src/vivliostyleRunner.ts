@@ -42,10 +42,6 @@ const buildArguments = (opts: CliOptionsInput): string[] => {
     args.push("--timeout", String(opts.timeoutSeconds));
   }
 
-  // Add --http-server-port 0 to disable internal HTTP server and use file:// protocol
-  // This prevents 404 errors when CLI tries to access /vivliostyle/* paths
-  args.push("--http-server-port", "0");
-
   if (opts.additionalArgs?.length) {
     args.push(...opts.additionalArgs);
   }
