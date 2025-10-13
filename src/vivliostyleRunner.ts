@@ -50,6 +50,12 @@ const buildArguments = (opts: CliOptionsInput): string[] => {
     args.push("--css", opts.css);
   }
 
+  // Disable internal static file serving by default so Vivliostyle
+  // loads files from the local workspace instead of translating
+  // relative paths to /vivliostyle/ HTTP URLs which can lead to 404s.
+  // Users can override by passing explicit additionalArgs.
+  args.push("--no-enable-static-serve");
+
   const entries = Array.isArray(opts.entry) ? opts.entry : (opts.entry ? [opts.entry] : []);
   args.push(...entries);
 
