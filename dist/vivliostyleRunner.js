@@ -25,15 +25,17 @@ const buildArguments = (opts) => {
     if (opts.timeoutSeconds && Number.isFinite(opts.timeoutSeconds)) {
         args.push("--timeout", String(opts.timeoutSeconds));
     }
-    // Add --http-server-port 0 to disable internal HTTP server and use file:// protocol
-    // This prevents 404 errors when CLI tries to access /vivliostyle/* paths
-    args.push("--http-server-port", "0");
     if (opts.additionalArgs?.length) {
         args.push(...opts.additionalArgs);
     }
     if (typeof opts.css === "string" && opts.css.length > 0) {
         args.push("--css", opts.css);
     }
+    // Disable internal static file serving by default so Vivliostyle
+    // loads files from the local workspace instead of translating
+    // relative paths to /vivliostyle/ HTTP URLs which can lead to 404s.
+    // Users can override by passing explicit additionalArgs.
+    args.push("--no-enable-static-serve");
     const entries = Array.isArray(opts.entry) ? opts.entry : (opts.entry ? [opts.entry] : []);
     args.push(...entries);
     return args;
