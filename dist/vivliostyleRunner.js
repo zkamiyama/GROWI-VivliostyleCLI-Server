@@ -75,6 +75,7 @@ const analyzeVivliostyleLine = (line, fallbackLevel) => {
                 level: VIVLIOSTYLE_LEVEL_MAP[token],
                 message: line,
                 matched: true,
+                sourceTimestamp: match.groups?.timestamp,
             };
         }
     }
@@ -82,6 +83,7 @@ const analyzeVivliostyleLine = (line, fallbackLevel) => {
         level: "debug",
         message: line,
         matched: true,
+        sourceTimestamp: match.groups?.timestamp,
     };
 };
 const createLogStreamProcessor = (fallbackLevel, appendLog) => {
@@ -92,8 +94,15 @@ const createLogStreamProcessor = (fallbackLevel, appendLog) => {
             pending = undefined;
             return;
         }
+        let timestamp = new Date().toISOString();
+        if (pending.sourceTimestamp) {
+            const parsed = Date.parse(pending.sourceTimestamp);
+            if (!Number.isNaN(parsed)) {
+                timestamp = new Date(parsed).toISOString();
+            }
+        }
         await appendLog({
-            timestamp: new Date().toISOString(),
+            timestamp,
             level: pending.level,
             message: pending.lines.join("\n"),
         });
@@ -108,16 +117,19 @@ const createLogStreamProcessor = (fallbackLevel, appendLog) => {
             return;
         }
         const analyzed = analyzeVivliostyleLine(sanitized, fallbackLevel);
-        if (!analyzed.matched && pending) {
-            pending.lines.push(analyzed.message);
+        if (analyzed.matched) {
+            await flushPending();
+            pending = {
+                level: analyzed.level,
+                lines: [analyzed.message],
+                sourceTimestamp: analyzed.sourceTimestamp,
+            };
             return;
         }
-        const { level, message } = analyzed;
-        if (!pending || pending.level !== level) {
-            await flushPending();
-            pending = { level, lines: [] };
+        if (!pending) {
+            pending = { level: analyzed.level, lines: [] };
         }
-        pending.lines.push(message);
+        pending.lines.push(analyzed.message);
     };
     const processBuffer = async (text) => {
         buffer += text;

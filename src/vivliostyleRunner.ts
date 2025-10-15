@@ -93,6 +93,7 @@ interface AnalyzedLine {
   level: LogLevel;
   message: string;
   matched: boolean;
+  sourceTimestamp?: string;
 }
 
 const analyzeVivliostyleLine = (line: string, fallbackLevel: LogLevel): AnalyzedLine => {
@@ -116,6 +117,7 @@ const analyzeVivliostyleLine = (line: string, fallbackLevel: LogLevel): Analyzed
         level: VIVLIOSTYLE_LEVEL_MAP[token],
         message: line,
         matched: true,
+        sourceTimestamp: match.groups?.timestamp,
       };
     }
   }
@@ -124,6 +126,7 @@ const analyzeVivliostyleLine = (line: string, fallbackLevel: LogLevel): Analyzed
     level: "debug",
     message: line,
     matched: true,
+    sourceTimestamp: match.groups?.timestamp,
   };
 };
 
@@ -132,15 +135,28 @@ const createLogStreamProcessor = (
   appendLog: RunVivliostyleOptions["appendLog"],
 ) => {
   let buffer = "";
-  let pending: { level: LogLevel; lines: string[] } | undefined;
+  let pending:
+    | {
+        level: LogLevel;
+        lines: string[];
+        sourceTimestamp?: string;
+      }
+    | undefined;
 
   const flushPending = async () => {
     if (!pending || pending.lines.length === 0) {
       pending = undefined;
       return;
     }
+    let timestamp = new Date().toISOString();
+    if (pending.sourceTimestamp) {
+      const parsed = Date.parse(pending.sourceTimestamp);
+      if (!Number.isNaN(parsed)) {
+        timestamp = new Date(parsed).toISOString();
+      }
+    }
     await appendLog({
-      timestamp: new Date().toISOString(),
+      timestamp,
       level: pending.level,
       message: pending.lines.join("\n"),
     });
@@ -157,17 +173,20 @@ const createLogStreamProcessor = (
     }
     const analyzed = analyzeVivliostyleLine(sanitized, fallbackLevel);
 
-    if (!analyzed.matched && pending) {
-      pending.lines.push(analyzed.message);
+    if (analyzed.matched) {
+      await flushPending();
+      pending = {
+        level: analyzed.level,
+        lines: [analyzed.message],
+        sourceTimestamp: analyzed.sourceTimestamp,
+      };
       return;
     }
 
-    const { level, message } = analyzed;
-    if (!pending || pending.level !== level) {
-      await flushPending();
-      pending = { level, lines: [] };
+    if (!pending) {
+      pending = { level: analyzed.level, lines: [] };
     }
-    pending.lines.push(message);
+    pending.lines.push(analyzed.message);
   };
 
   const processBuffer = async (text: string) => {
