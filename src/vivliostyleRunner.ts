@@ -89,15 +89,18 @@ const VIVLIOSTYLE_LEVEL_MAP: Record<string, LogLevel> = {
   DEBUG: "debug",
 };
 
-const analyzeVivliostyleLine = (line: string, fallbackLevel: LogLevel): {
+interface AnalyzedLine {
   level: LogLevel;
   message: string;
-} => {
+  matched: boolean;
+}
+
+const analyzeVivliostyleLine = (line: string, fallbackLevel: LogLevel): AnalyzedLine => {
   const match = line.match(
     /^((?<timestamp>\d{4}-\d{2}-\d{2}T[^\s]+)\s+)?vs-cli\s+(?<payload>.*)$/i,
   );
   if (!match) {
-    return { level: fallbackLevel, message: line };
+    return { level: fallbackLevel, message: line, matched: false };
   }
 
   const payload = (match.groups?.payload ?? "").trimStart();
@@ -112,6 +115,7 @@ const analyzeVivliostyleLine = (line: string, fallbackLevel: LogLevel): {
       return {
         level: VIVLIOSTYLE_LEVEL_MAP[token],
         message: line,
+        matched: true,
       };
     }
   }
@@ -119,6 +123,7 @@ const analyzeVivliostyleLine = (line: string, fallbackLevel: LogLevel): {
   return {
     level: "debug",
     message: line,
+    matched: true,
   };
 };
 
@@ -150,7 +155,14 @@ const createLogStreamProcessor = (
       }
       return;
     }
-    const { level, message } = analyzeVivliostyleLine(sanitized, fallbackLevel);
+    const analyzed = analyzeVivliostyleLine(sanitized, fallbackLevel);
+
+    if (!analyzed.matched && pending) {
+      pending.lines.push(analyzed.message);
+      return;
+    }
+
+    const { level, message } = analyzed;
     if (!pending || pending.level !== level) {
       await flushPending();
       pending = { level, lines: [] };
