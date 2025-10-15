@@ -82,6 +82,7 @@ const cliOptionsSchema = zod_1.z.object({
     timeoutSeconds: zod_1.z.number().int().positive().max(3600 * 24).optional(),
     additionalArgs: zod_1.z.array(zod_1.z.string().min(1)).optional(),
     css: cssOptionSchema.optional(),
+    logLevel: zod_1.z.enum(["silent", "info", "verbose", "debug"]).optional(),
 });
 const jobRequestSchema = zod_1.z.object({
     jobId: zod_1.z.string().min(3).max(64).optional(),

@@ -52,6 +52,7 @@ const cliOptionsSchema = z.object({
   timeoutSeconds: z.number().int().positive().max(3600 * 24).optional(),
   additionalArgs: z.array(z.string().min(1)).optional(),
   css: cssOptionSchema.optional(),
+  logLevel: z.enum(["silent", "info", "verbose", "debug"]).optional(),
 });
 
 const jobRequestSchema = z.object({

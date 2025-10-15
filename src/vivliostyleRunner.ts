@@ -42,12 +42,24 @@ const buildArguments = (opts: CliOptionsInput): string[] => {
     args.push("--timeout", String(opts.timeoutSeconds));
   }
 
+  // Additional args come before our defaults so explicit user-provided
+  // flags can be detected and respected below (e.g., --log-level).
   if (opts.additionalArgs?.length) {
     args.push(...opts.additionalArgs);
   }
 
   if (typeof opts.css === "string" && opts.css.length > 0) {
     args.push("--css", opts.css);
+  }
+
+  // Apply log level: default to 'debug' when frontend did not specify.
+  const hasLogLevelInAdditional = (opts.additionalArgs ?? []).some(
+    (a) => a === "--log-level" || a.startsWith("--log-level=")
+  );
+  if (opts.logLevel) {
+    args.push("--log-level", opts.logLevel);
+  } else if (!hasLogLevelInAdditional) {
+    args.push("--log-level", "debug");
   }
 
   // Disable internal static file serving by default so Vivliostyle

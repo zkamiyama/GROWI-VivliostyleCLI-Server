@@ -10,6 +10,8 @@ export interface CliOptionsInput {
   timeoutSeconds?: number;
   additionalArgs?: string[];
   css?: string;
+  // Vivliostyle CLI: --log-level <silent|info|verbose|debug>
+  logLevel?: "silent" | "info" | "verbose" | "debug";
 }
 
 export interface JobMetadata extends Record<string, unknown> {
