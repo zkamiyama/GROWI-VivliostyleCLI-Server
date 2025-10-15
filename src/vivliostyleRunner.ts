@@ -74,20 +74,112 @@ const buildArguments = (opts: CliOptionsInput): string[] => {
   return args;
 };
 
-const streamToLog = async (
-  chunk: Buffer,
-  level: LogEntry["level"],
+type LogLevel = LogEntry["level"];
+
+const ANSI_PATTERN = /\u001B\[[0-9;]*m/g;
+
+const stripAnsi = (value: string): string => value.replace(ANSI_PATTERN, "");
+
+const VIVLIOSTYLE_LEVEL_MAP: Record<string, LogLevel> = {
+  ERROR: "error",
+  WARN: "warn",
+  WARNING: "warn",
+  INFO: "info",
+  SUCCESS: "info",
+  DEBUG: "debug",
+};
+
+const analyzeVivliostyleLine = (line: string, fallbackLevel: LogLevel): {
+  level: LogLevel;
+  message: string;
+} => {
+  const match = line.match(
+    /^((?<timestamp>\d{4}-\d{2}-\d{2}T[^\s]+)\s+)?vs-cli\s+(?<payload>.*)$/i,
+  );
+  if (!match) {
+    return { level: fallbackLevel, message: line };
+  }
+
+  const payload = (match.groups?.payload ?? "").trimStart();
+  const upperPayload = payload.toUpperCase();
+
+  for (const token of Object.keys(VIVLIOSTYLE_LEVEL_MAP)) {
+    if (
+      upperPayload.startsWith(`${token} `) ||
+      upperPayload.startsWith(`${token}:`) ||
+      upperPayload === token
+    ) {
+      return {
+        level: VIVLIOSTYLE_LEVEL_MAP[token],
+        message: line,
+      };
+    }
+  }
+
+  return {
+    level: "debug",
+    message: line,
+  };
+};
+
+const createLogStreamProcessor = (
+  fallbackLevel: LogLevel,
   appendLog: RunVivliostyleOptions["appendLog"],
 ) => {
-  const text = chunk.toString("utf8");
-  const lines = text.split(/\r?\n/).filter((line) => line.trim().length > 0);
-  for (const line of lines) {
+  let buffer = "";
+  let pending: { level: LogLevel; lines: string[] } | undefined;
+
+  const flushPending = async () => {
+    if (!pending || pending.lines.length === 0) {
+      pending = undefined;
+      return;
+    }
     await appendLog({
       timestamp: new Date().toISOString(),
-      level,
-      message: line,
+      level: pending.level,
+      message: pending.lines.join("\n"),
     });
-  }
+    pending = undefined;
+  };
+
+  const handleLine = async (rawLine: string) => {
+    const sanitized = stripAnsi(rawLine);
+    if (sanitized.trim().length === 0) {
+      if (pending) {
+        pending.lines.push("");
+      }
+      return;
+    }
+    const { level, message } = analyzeVivliostyleLine(sanitized, fallbackLevel);
+    if (!pending || pending.level !== level) {
+      await flushPending();
+      pending = { level, lines: [] };
+    }
+    pending.lines.push(message);
+  };
+
+  const processBuffer = async (text: string) => {
+    buffer += text;
+    buffer = buffer.replace(/\r\n/g, "\n").replace(/\r/g, "\n");
+    const parts = buffer.split("\n");
+    buffer = parts.pop() ?? "";
+    for (const part of parts) {
+      await handleLine(part);
+    }
+  };
+
+  return {
+    push: async (chunk: Buffer) => {
+      await processBuffer(chunk.toString("utf8"));
+    },
+    flush: async () => {
+      if (buffer.length > 0) {
+        await handleLine(buffer);
+        buffer = "";
+      }
+      await flushPending();
+    },
+  };
 };
 
 export const runVivliostyle = async (
@@ -98,6 +190,8 @@ export const runVivliostyle = async (
   logger.info(`${logPrefix} starting Vivliostyle CLI`, { args });
 
   let timedOut = false;
+  const stdoutProcessor = createLogStreamProcessor("info", options.appendLog);
+  const stderrProcessor = createLogStreamProcessor("error", options.appendLog);
   const child = spawn(process.execPath, [CLI_BIN, ...args], {
     cwd: options.workspaceDir,
     env: {
@@ -107,10 +201,10 @@ export const runVivliostyle = async (
   });
 
   child.stdout?.on("data", (chunk: Buffer) => {
-    void streamToLog(chunk, "info", options.appendLog);
+    void stdoutProcessor.push(chunk);
   });
   child.stderr?.on("data", (chunk: Buffer) => {
-    void streamToLog(chunk, "error", options.appendLog);
+    void stderrProcessor.push(chunk);
   });
 
   const timeout = config.cliTimeoutMs;
@@ -141,11 +235,21 @@ export const runVivliostyle = async (
   return await new Promise((resolve, reject) => {
     child.once("error", (error) => {
       timeoutController?.abort();
+      void stdoutProcessor.flush();
+      void stderrProcessor.flush();
       reject(error);
     });
 
-    child.once("close", (code, signal) => {
+    child.once("close", async (code, signal) => {
       timeoutController?.abort();
+      try {
+        await stdoutProcessor.flush();
+        await stderrProcessor.flush();
+      } catch (flushError) {
+        logger.warn(`${logPrefix} failed to flush Vivliostyle log streams`, {
+          error: (flushError as Error).message,
+        });
+      }
       logger.info(`${logPrefix} finished Vivliostyle CLI`, { code, signal });
       resolve({
         exitCode: code,
