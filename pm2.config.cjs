@@ -25,7 +25,14 @@ module.exports = {
       env: {
         NODE_ENV: 'production',
         VIV_PROXY_TARGET: process.env.VIV_PROXY_TARGET || 'http://127.0.0.1:4781',
-        VIV_PROXY_PORT: process.env.VIV_PROXY_PORT || 4871
+        GROWI_TARGET: process.env.GROWI_TARGET || 'http://127.0.0.1:3000',
+        VIV_PROXY_PORT: process.env.VIV_PROXY_PORT || 4871,
+        VIV_PROXY_HOST: process.env.VIV_PROXY_HOST || '0.0.0.0',
+        // カスタムルーティング設定（Keycloak など）
+        VIV_CUSTOM_ROUTING_ENABLED: process.env.VIV_CUSTOM_ROUTING_ENABLED || 'true',
+        VIV_KEYCLOAK_ROUTING_ENABLED: process.env.VIV_KEYCLOAK_ROUTING_ENABLED || 'true',
+        VIV_KEYCLOAK_TARGET: process.env.VIV_KEYCLOAK_TARGET || 'http://127.0.0.1:8080',
+        VIV_KEYCLOAK_PATH: process.env.VIV_KEYCLOAK_PATH || '/auth'
       }
     }
   ]
