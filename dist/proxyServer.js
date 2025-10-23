@@ -58,6 +58,29 @@ const createReverseProxyServer = (config) => {
         ws: true,
         ignorePath: false,
     });
+    // カスタムルート用のプロキシ（Keycloak など）
+    const customProxies = [];
+    if (config.customRoutes?.enabled && config.customRoutes.keycloak?.enabled) {
+        const keycloakUrl = new node_url_1.URL(config.customRoutes.keycloak.target);
+        const keycloakProxy = http_proxy_1.default.createProxyServer({
+            target: keycloakUrl.href,
+            changeOrigin: true,
+            ws: true,
+            ignorePath: false,
+        });
+        customProxies.push({
+            path: config.customRoutes.keycloak.path,
+            proxy: keycloakProxy,
+            target: keycloakUrl.href,
+        });
+        keycloakProxy.on("error", (error, req, res) => {
+            handleProxyError(error, req, res, keycloakUrl.href);
+        });
+        logger_1.logger.info("Keycloak routing enabled", {
+            path: config.customRoutes.keycloak.path,
+            target: keycloakUrl.href,
+        });
+    }
     const handleProxyError = (error, req, res, targetHref) => {
         logger_1.logger.error("Reverse proxy encountered an error", {
             error: error.message,
@@ -85,6 +108,13 @@ const createReverseProxyServer = (config) => {
     });
     const server = node_http_1.default.createServer((req, res) => {
         const url = req.url || "/";
+        // カスタムルートのチェック（優先度高）
+        for (const customRoute of customProxies) {
+            if (url.startsWith(customRoute.path)) {
+                customRoute.proxy.web(req, res);
+                return;
+            }
+        }
         // /vivliostyle で始まる場合は CLI サーバへ、それ以外は GROWI へ
         if (url.startsWith("/vivliostyle")) {
             vivliostyleProxy.web(req, res);
@@ -95,6 +125,13 @@ const createReverseProxyServer = (config) => {
     });
     server.on("upgrade", (req, socket, head) => {
         const url = req.url || "/";
+        // カスタムルートのチェック（WebSocket）
+        for (const customRoute of customProxies) {
+            if (url.startsWith(customRoute.path)) {
+                customRoute.proxy.ws(req, socket, head);
+                return;
+            }
+        }
         // WebSocket も同様に振り分け
         if (url.startsWith("/vivliostyle")) {
             vivliostyleProxy.ws(req, socket, head);
@@ -111,11 +148,21 @@ if (require.main === module) {
     const growiTarget = process.env.GROWI_TARGET ?? "http://127.0.0.1:3000";
     const port = Number.parseInt(process.env.VIV_PROXY_PORT ?? "4871", 10);
     const hostname = process.env.VIV_PROXY_HOST ?? "0.0.0.0";
+    const customRoutingEnabled = process.env.VIV_CUSTOM_ROUTING_ENABLED === "true";
+    const keycloakEnabled = process.env.VIV_KEYCLOAK_ROUTING_ENABLED === "true";
     const server = (0, exports.createReverseProxyServer)({
         vivliostyleTarget,
         growiTarget,
         port,
         hostname,
+        customRoutes: customRoutingEnabled ? {
+            enabled: true,
+            keycloak: keycloakEnabled ? {
+                enabled: true,
+                target: process.env.VIV_KEYCLOAK_TARGET ?? "http://127.0.0.1:8080",
+                path: process.env.VIV_KEYCLOAK_PATH ?? "/auth",
+            } : undefined,
+        } : undefined,
     });
     server.listen(port, hostname, () => {
         const address = server.address();
@@ -124,6 +171,8 @@ if (require.main === module) {
             growiTarget,
             port: address.port,
             hostname: address.address,
+            customRoutingEnabled,
+            keycloakEnabled: customRoutingEnabled && keycloakEnabled,
         });
     });
 }

@@ -46,6 +46,15 @@ export const config = {
     process.env.VIV_FRONTEND_PING_TIMEOUT_MS,
     DEFAULT_FRONTEND_PING_TIMEOUT_MS,
   ),
+  // カスタムルーティング設定
+  customRouting: {
+    enabled: process.env.VIV_CUSTOM_ROUTING_ENABLED === "true",
+    keycloak: {
+      enabled: process.env.VIV_KEYCLOAK_ROUTING_ENABLED === "true",
+      target: process.env.VIV_KEYCLOAK_TARGET ?? "http://127.0.0.1:8080",
+      path: process.env.VIV_KEYCLOAK_PATH ?? "/auth",
+    },
+  },
 };
 
 export type ServiceConfig = typeof config;
