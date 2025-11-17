@@ -1,0 +1,95 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# update: complete overwrite deploy for this repository
+# - detects PM2 processes running from this repo and stops/deletes them
+# - fetches origin/master, hard-resets and cleans
+# - installs production deps, builds, starts via pm2.config.cjs
+# - runs npx pm2 startup and attempts to apply the printed command if possible
+
+REPO_ROOT="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
+cd "$REPO_ROOT"
+
+echo "Snapshotting disabled by request; proceeding without saving snapshots."
+
+# Attempt to stop/delete well-known PM2 apps for this project
+echo "Stopping known PM2 apps (if present)..."
+KNOWN_APPS="vivliostyle-proxy vivliostyle-cli-server"
+for app in $KNOWN_APPS; do
+  echo "Stopping $app (if exists)..."
+  npx pm2 stop "$app" || true
+  echo "Deleting $app (if exists)..."
+  npx pm2 delete "$app" || true
+done
+
+echo "Skipping dynamic pm2 discovery (pm2 jlist) to avoid daemon socket/EPIPE issues; only stopping known apps: $KNOWN_APPS"
+
+echo "Fetching remote and hard-reset to origin/master..."
+git fetch origin --prune
+git reset --hard origin/master
+git clean -fdx
+
+echo "Installing dependencies for build (npm ci)"
+# install all deps so build tools (devDependencies like rimraf) are present
+npm ci
+
+# Install Playwright system deps (if apt-get available) and Chromium runtime to avoid runtime failures.
+# This is optional and best-effort: failures won't abort the update.
+if command -v npx >/dev/null 2>&1; then
+  if command -v apt-get >/dev/null 2>&1; then
+    echo "Detected apt-get: attempting 'npx playwright install-deps' (may require sudo)"
+    # try to install system deps; don't fail deploy if it doesn't work
+    npx playwright install-deps || true
+  else
+    echo "apt-get not found; skipping 'playwright install-deps'"
+  fi
+
+  echo "Attempting 'npx playwright install chromium' to pre-download Chromium runtime (best-effort)"
+  npx playwright install chromium || true
+else
+  echo "npx not found; skipping Playwright installation steps"
+fi
+
+# After successful build we'll prune dev deps to keep production footprint small
+
+if [ -f "$REPO_ROOT/package.json" ]; then
+  if grep -q '"build"\s*:' package.json >/dev/null 2>&1; then
+    echo "Running npm run build"
+    npm run build
+  else
+    echo "No build script found in package.json; skipping build"
+  fi
+fi
+
+# After build, remove devDependencies to keep production footprint small
+echo "Pruning devDependencies (npm prune --production)"
+npm prune --production || true
+
+# Start via pm2.config.cjs if present
+if [ -f "$REPO_ROOT/pm2.config.cjs" ]; then
+  echo "Starting processes from pm2.config.cjs"
+  npx pm2 start pm2.config.cjs --update-env --env production || true
+  npx pm2 save || true
+else
+  echo "pm2.config.cjs not found; nothing started. If you want to start manually, run: npx pm2 start <script>"
+fi
+
+echo "Running 'npx pm2 startup' to generate startup command..."
+STARTUP_OUTPUT=$(npx pm2 startup 2>&1 || true)
+echo "$STARTUP_OUTPUT"
+
+echo "NOTE: pm2 startup output printed above. If your system requires manual action, run the command shown by 'npx pm2 startup' as root (for example: 'systemctl enable pm2-root'), then run 'npx pm2 save'."
+
+echo "Deploy completed."
+
+echo "Quick smoke checks (if curl available):"
+if command -v curl >/dev/null 2>&1; then
+  echo -n "Proxy root (http://127.0.0.1:4871/) -> "
+  curl -fsS -o /dev/null -w "%{http_code}\n" http://127.0.0.1:4871/ || echo "FAILED"
+  echo -n "API health (http://127.0.0.1:4781/healthz) -> "
+  curl -fsS -o /dev/null -w "%{http_code}\n" http://127.0.0.1:4781/healthz || echo "FAILED"
+else
+  echo "curl not found; please perform manual smoke checks."
+fi
+
+exit 0
